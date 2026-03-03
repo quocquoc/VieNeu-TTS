@@ -217,7 +217,7 @@ def phonemize_batch(texts: list[str], skip_normalize: bool = False, phoneme_dict
 
     if global_unknown:
         u_words = sorted(list(global_unknown))
-        res_phones = espeak_fallback_batch(u_words, 'en-us')
+        res_phones = espeak_fallback_batch(u_words, 'vi')
         lut = {w: f"<en>{p}" for w, p in zip(u_words, res_phones)}
         for sent in batch_token_lists:
             for t in sent:
