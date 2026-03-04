@@ -206,11 +206,41 @@ class VieNeuTTS(BaseVieneuTTS):
         if not chunks:
             return np.array([], dtype=np.float32)
 
-        # Pre-phonemize all inputs for performance
+        if len(chunks) == 1:
+            ref_phonemes = self.get_ref_phonemes(ref_text)
+            phonemes = phonemize_with_dict(chunks[0], skip_normalize=True)
+            if self._is_quantized_model:
+                output_str = self._infer_ggml(ref_codes, ref_phonemes, phonemes, temperature, top_k)
+            else:
+                prompt_ids = self._apply_chat_template(ref_codes, ref_phonemes, phonemes)
+                output_str = self._infer_torch(prompt_ids, temperature, top_k)
+            wav = self._decode(output_str)
+            return self._apply_watermark(wav)
+
+        all_wavs = self.infer_batch(
+            chunks,
+            ref_codes=ref_codes,
+            ref_text=ref_text,
+            temperature=temperature,
+            top_k=top_k,
+            skip_normalize=True,
+            apply_watermark=False
+        )
+        final_wav = join_audio_chunks(all_wavs, self.sample_rate, silence_p, crossfade_p)
+        return self._apply_watermark(final_wav)
+
+    def infer_batch(self, texts: List[str], ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None, ref_text: Optional[str] = None, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False, apply_watermark: bool = True) -> List[np.ndarray]:
+        ref_codes, ref_text = self._resolve_ref_voice(voice, ref_audio, ref_codes, ref_text)
+
+        if not skip_normalize:
+            texts = [self.normalizer.normalize(t) for t in texts]
+
         ref_phonemes = self.get_ref_phonemes(ref_text)
-        chunk_phonemes = phonemize_batch(chunks, skip_normalize=True)
+        chunk_phonemes = phonemize_batch(texts, skip_normalize=True)
 
         all_wavs = []
+        # If model is GGUF, we still process sequentially for now as llama-cpp-python batching for TTS is complex
+        # If model is Torch, we can leverage batch generation if supported by transformers and memory
         for phonemes in chunk_phonemes:
             if self._is_quantized_model:
                 output_str = self._infer_ggml(ref_codes, ref_phonemes, phonemes, temperature, top_k)
@@ -218,10 +248,11 @@ class VieNeuTTS(BaseVieneuTTS):
                 prompt_ids = self._apply_chat_template(ref_codes, ref_phonemes, phonemes)
                 output_str = self._infer_torch(prompt_ids, temperature, top_k)
             wav = self._decode(output_str)
+            if apply_watermark:
+                wav = self._apply_watermark(wav)
             all_wavs.append(wav)
 
-        final_wav = join_audio_chunks(all_wavs, self.sample_rate, silence_p, crossfade_p)
-        return self._apply_watermark(final_wav)
+        return all_wavs
 
     def infer_stream(self, text: str, ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None, ref_text: Optional[str] = None, max_chars: int = 256, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False) -> Generator[np.ndarray, None, None]:
 

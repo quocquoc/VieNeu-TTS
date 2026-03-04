@@ -346,7 +346,40 @@ def normalize_acronyms(text):
         processed.append(s + sep)
     return "".join(processed)
 
+def expand_alphanumeric(text):
+    def _repl(m):
+        num = m.group(1)
+        char = m.group(2).lower()
+        if char in _letter_key_vi:
+            pronunciation = _letter_key_vi[char]
+            # Special case for roads (Quốc lộ 1D -> Quốc lộ 1 đê)
+            if char == 'd' and ('quốc lộ' in text.lower() or 'ql' in text.lower()):
+                pronunciation = 'đê'
+            return f"{num} {pronunciation}"
+        return m.group(0)
+    return RE_ALPHANUMERIC.sub(_repl, text)
+
+def expand_symbols(text):
+    symbols_map = {
+        '&': ' và ', '+': ' cộng ', '=': ' bằng ', '#': ' thăng ',
+        '>': ' lớn hơn ', '<': ' nhỏ hơn ',
+        '≥': ' lớn hơn hoặc bằng ', '≤': ' nhỏ hơn hoặc bằng ',
+        '±': ' cộng trừ ', '≈': ' xấp xỉ '
+    }
+    for s, v in symbols_map.items():
+        text = text.replace(s, v)
+    return text
+
+def expand_temperatures(text):
+    text = RE_TEMP_C_NEG.sub(r'âm \1 độ xê', text)
+    text = RE_TEMP_F_NEG.sub(r'âm \1 độ ép', text)
+    text = RE_TEMP_C.sub(r'\1 độ xê', text)
+    text = RE_TEMP_F.sub(r'\1 độ ép', text)
+    text = RE_DEGREE.sub(' độ ', text)
+    return text
+
 def normalize_others(text):
+    # 1. Expand acronym exceptions and basic patterns
     for pattern, v in _ACRONYMS_EXCEPTIONS_RE:
         text = pattern.sub(v, text)
     
@@ -354,48 +387,32 @@ def normalize_others(text):
     text = normalize_emails(text)
     text = normalize_slashes(text)
 
+    # 2. Expand Roman numerals and standalone letters
     text = RE_ROMAN_NUMBER.sub(expand_roman, text)
     text = RE_LETTER.sub(expand_letter, text)
+    text = expand_alphanumeric(text)
     
-    def _expand_alphanumeric(m):
-        num = m.group(1)
-        char = m.group(2).lower()
-        if char in _letter_key_vi:
-            pronunciation = _letter_key_vi[char]
-            if char == 'd' and ('quốc lộ' in text.lower() or 'ql' in text.lower()):
-                pronunciation = 'đê'
-            return f"{num} {pronunciation}"
-        return m.group(0)
-    
-    text = RE_ALPHANUMERIC.sub(_expand_alphanumeric, text)
-    
-    # Handle quotes and smart quotes
+    # 3. Clean quotes and symbols
     text = re.sub(r'["\'“”‘’]', '', text)
+    text = expand_symbols(text)
 
-    text = text.replace('&', ' và ').replace('+', ' cộng ').replace('=', ' bằng ').replace('#', ' thăng ')
-    text = text.replace('>', ' lớn hơn ').replace('<', ' nhỏ hơn ')
-    text = text.replace('≥', ' lớn hơn hoặc bằng ').replace('≤', ' nhỏ hơn hoặc bằng ')
-    text = text.replace('±', ' cộng trừ ').replace('≈', ' xấp xỉ ')
-
+    # 4. Expand units and measurements
     text = expand_compound_units(text)
     text = expand_measurement(text)
     text = expand_currency(text)
     
+    # 5. Handle brackets and temperatures
     text = RE_BRACKETS.sub(r', \1, ', text)
     text = RE_STRIP_BRACKETS.sub(' ', text)
-    
-    text = RE_TEMP_C_NEG.sub(r'âm \1 độ xê', text)
-    text = RE_TEMP_F_NEG.sub(r'âm \1 độ ép', text)
-    text = RE_TEMP_C.sub(r'\1 độ xê', text)
-    text = RE_TEMP_F.sub(r'\1 độ ép', text)
-    text = RE_DEGREE.sub(' độ ', text)
+    text = expand_temperatures(text)
 
+    # 6. Normalize acronyms
     text = normalize_acronyms(text)
 
-    def _expand_version(m):
-        return ' chấm '.join(m.group(1).split('.'))
-    text = RE_VERSION.sub(_expand_version, text)
+    # 7. Expand version numbers (1.2.3 -> 1 chấm 2 chấm 3)
+    text = RE_VERSION.sub(lambda m: ' chấm '.join(m.group(1).split('.')), text)
 
+    # 8. Final cleanup
     text = RE_CLEAN_OTHERS.sub(' ', text)
     
     text = text.replace('__START_EN__', '<en>').replace('__END_EN__', '</en>')

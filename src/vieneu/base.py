@@ -266,7 +266,12 @@ class BaseVieneuTTS(ABC):
 
     @abstractmethod
     def infer(self, text: str, **kwargs: Any) -> np.ndarray:
-        """Main inference method."""
+        """Main inference method for single text."""
+        pass
+
+    @abstractmethod
+    def infer_batch(self, texts: List[str], apply_watermark: bool = True, **kwargs: Any) -> List[np.ndarray]:
+        """Main inference method for batch processing."""
         pass
 
     def close(self) -> None:

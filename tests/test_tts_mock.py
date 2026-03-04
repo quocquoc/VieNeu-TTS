@@ -55,6 +55,22 @@ def test_tts_infer_mock(mock_tts):
         assert isinstance(wav, np.ndarray)
         assert len(wav) > 0
 
+def test_tts_infer_batch_mock(mock_tts):
+    with patch.object(VieNeuTTS, '_decode', return_value=np.zeros(1000)):
+        texts = ["Xin chào", "Chào buổi sáng"]
+        results = mock_tts.infer_batch(texts)
+        assert isinstance(results, list)
+        assert len(results) == 2
+        for res in results:
+            assert isinstance(res, np.ndarray)
+
+def test_tts_infer_multi_chunk_mock(mock_tts):
+    with patch.object(VieNeuTTS, '_decode', return_value=np.zeros(1000)):
+        # Force multiple chunks by using very small max_chars
+        wav = mock_tts.infer("Xin chào Việt Nam thân yêu của tôi", max_chars=5)
+        assert isinstance(wav, np.ndarray)
+        assert len(wav) > 0
+
 def test_tts_list_voices(mock_tts):
     voices = mock_tts.list_preset_voices()
     assert len(voices) > 0

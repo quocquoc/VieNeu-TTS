@@ -2,6 +2,8 @@ import torch
 import gc
 import librosa
 import numpy as np
+from typing import Optional, Union, List
+from pathlib import Path
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import logging
 from neucodec import NeuCodec, DistillNeuCodec
@@ -140,22 +142,19 @@ class XPUVieNeuTTS(VieNeuTTS):
     def infer_batch(
             self, 
             texts: list[str], 
-            voice: dict = None, 
-            ref_codes: torch.Tensor = None, 
-            ref_text: str = None,
+            ref_audio: Optional[Union[str, Path]] = None,
+            ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None,
+            ref_text: Optional[str] = None,
+            voice: Optional[dict] = None,
             temperature: float = 1.0, 
             top_k: int = 50,
-            skip_normalize: bool = False
+            skip_normalize: bool = False,
+            apply_watermark: bool = True
             ) -> list[np.ndarray]:
         """
         Thực hiện inference theo batch trên XPU sử dụng thuần PyTorch.
         """
-        if voice is not None:
-            ref_codes = voice.get('codes', ref_codes)
-            ref_text = voice.get('text', ref_text)
-        
-        if ref_codes is None or ref_text is None:
-            raise ValueError("Phải cung cấp voice hoặc ref_codes và ref_text.")
+        ref_codes, ref_text = self._resolve_ref_voice(voice, ref_audio, ref_codes, ref_text)
 
         if not skip_normalize:
             texts = [self.normalizer.normalize(t) for t in texts]
@@ -201,8 +200,8 @@ class XPUVieNeuTTS(VieNeuTTS):
             output_str = self.tokenizer.decode(generated_ids, add_special_tokens=False)
             wav = self._decode(output_str)
             
-            if self.watermarker:
-                wav = self.watermarker.apply_watermark(wav, sample_rate=self.sample_rate)
+            if apply_watermark:
+                wav = self._apply_watermark(wav)
                 
             results.append(wav)
 

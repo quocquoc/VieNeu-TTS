@@ -177,14 +177,14 @@ class FastVieNeuTTS(BaseVieneuTTS):
 
         return wav
 
-    def infer_batch(self, texts: List[str], ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None, ref_text: Optional[str] = None, max_batch_size: Optional[int] = None, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False) -> List[np.ndarray]:
+    def infer_batch(self, texts: List[str], ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None, ref_text: Optional[str] = None, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False, apply_watermark: bool = True, max_batch_size: Optional[int] = None) -> List[np.ndarray]:
 
         if not skip_normalize:
             texts = [self.normalizer.normalize(t) for t in texts]
 
         max_batch_size = max_batch_size or self.max_batch_size
 
-        ref_codes, ref_text = self._resolve_ref_voice(voice, None, ref_codes, ref_text)
+        ref_codes, ref_text = self._resolve_ref_voice(voice, ref_audio, ref_codes, ref_text)
 
         self.gen_config.temperature = temperature
         self.gen_config.top_k = top_k
@@ -196,7 +196,8 @@ class FastVieNeuTTS(BaseVieneuTTS):
             responses = self.backbone(prompts, gen_config=self.gen_config, do_preprocess=False)
             batch_codes = [response.text for response in responses]
             batch_wavs = [self._decode(codes) for codes in batch_codes]
-            batch_wavs = [self._apply_watermark(w) for w in batch_wavs]
+            if apply_watermark:
+                batch_wavs = [self._apply_watermark(w) for w in batch_wavs]
             all_wavs.extend(batch_wavs)
         return all_wavs
 
