@@ -14,7 +14,7 @@ outputs/
 .env
 
 # Finetune Data & Checkpoints
-finetune/dataset/
+finetune/dataset/raw_audio/
 finetune/output/
 
 # Merged Models
