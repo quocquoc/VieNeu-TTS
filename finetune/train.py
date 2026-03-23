@@ -5,10 +5,9 @@ import torch
 import random
 from torch.utils.data import Dataset
 from transformers import (
-    AutoTokenizer, 
-    AutoModelForCausalLM, 
-    Trainer, 
-    default_data_collator
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    Trainer,
 )
 from peft import get_peft_model
 
@@ -23,35 +22,64 @@ from finetune.configs.lora_config import lora_config, training_config, get_train
 def preprocess_sample(sample, tokenizer, max_len=2048):
     speech_gen_start = tokenizer.convert_tokens_to_ids('<|SPEECH_GENERATION_START|>')
     ignore_index = -100
-    
+
     phones = sample["phones"]
     vq_codes = sample["codes"]
-    
+
     codes_str = "".join([f"<|speech_{i}|>" for i in vq_codes])
     chat = f"""user: Convert the text to speech:<|TEXT_PROMPT_START|>{phones}<|TEXT_PROMPT_END|>\nassistant:<|SPEECH_GENERATION_START|>{codes_str}<|SPEECH_GENERATION_END|>"""
-    
+
     ids = tokenizer.encode(chat)
-    
-    # Pad nếu ngắn
-    if len(ids) < max_len:
-        ids = ids + [tokenizer.pad_token_id] * (max_len - len(ids))
-    elif len(ids) > max_len:
+
+    # Truncate if too long, but do NOT pad here (collator handles padding)
+    if len(ids) > max_len:
         ids = ids[:max_len]
-    
+
     input_ids = torch.tensor(ids, dtype=torch.long)
     labels = torch.full_like(input_ids, ignore_index)
-    
+
     speech_gen_start_idx = (input_ids == speech_gen_start).nonzero(as_tuple=True)[0]
     if len(speech_gen_start_idx) > 0:
         speech_gen_start_idx = speech_gen_start_idx[0]
         labels[speech_gen_start_idx:] = input_ids[speech_gen_start_idx:]
-    
-    attention_mask = (input_ids != tokenizer.pad_token_id).long()
-    
+
+    attention_mask = torch.ones_like(input_ids)
+
     return {
         "input_ids": input_ids,
         "labels": labels,
         "attention_mask": attention_mask
+    }
+
+
+def dynamic_collate_fn(batch):
+    """Pad batch to the longest sequence in the batch, not to max_len."""
+    pad_token_id = batch[0]["input_ids"][-1].item()  # fallback
+    ignore_index = -100
+
+    max_len_in_batch = max(item["input_ids"].size(0) for item in batch)
+
+    input_ids_list = []
+    labels_list = []
+    attention_mask_list = []
+
+    for item in batch:
+        seq_len = item["input_ids"].size(0)
+        pad_len = max_len_in_batch - seq_len
+
+        if pad_len > 0:
+            input_ids_list.append(torch.cat([item["input_ids"], torch.full((pad_len,), pad_token_id, dtype=torch.long)]))
+            labels_list.append(torch.cat([item["labels"], torch.full((pad_len,), ignore_index, dtype=torch.long)]))
+            attention_mask_list.append(torch.cat([item["attention_mask"], torch.zeros(pad_len, dtype=torch.long)]))
+        else:
+            input_ids_list.append(item["input_ids"])
+            labels_list.append(item["labels"])
+            attention_mask_list.append(item["attention_mask"])
+
+    return {
+        "input_ids": torch.stack(input_ids_list),
+        "labels": torch.stack(labels_list),
+        "attention_mask": torch.stack(attention_mask_list),
     }
 
 class VieNeuDataset(Dataset):
@@ -123,9 +151,10 @@ def run_training():
     
     # Apply LoRA
     print("🦜 Đang áp dụng LoRA adapters...")
+    model.enable_input_require_grads()  # required for gradient checkpointing + LoRA
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
-    
+
     # Trainer Setup
     args = get_training_args(training_config)
 
@@ -134,7 +163,7 @@ def run_training():
         args=args,
         train_dataset=full_dataset,
         eval_dataset=None,
-        data_collator=default_data_collator,
+        data_collator=dynamic_collate_fn,
     )
     
     print("🦜 Bắt đầu quá trình huấn luyện! (Chúc may mắn)")

@@ -21,8 +21,8 @@ training_config = {
     'run_name': "VieNeu-TTS-0.3B-LoRA",
     'output_dir': os.path.join("finetune", "output"),
     
-    'per_device_train_batch_size': 2, 
-    'gradient_accumulation_steps': 1, 
+    'per_device_train_batch_size': 1,
+    'gradient_accumulation_steps': 2,  # effective batch size stays 2
     
     'learning_rate': 2e-4, 
     'max_steps': 5000,    
@@ -52,7 +52,8 @@ def get_training_args(config):
         eval_strategy="no",
         save_strategy="steps",
         save_total_limit=2,
-        report_to="none", 
+        report_to="none",
         dataloader_num_workers=4,
         ddp_find_unused_parameters=False,
+        gradient_checkpointing=True,
     )

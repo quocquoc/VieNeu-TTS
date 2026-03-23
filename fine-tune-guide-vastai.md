@@ -130,6 +130,9 @@ git clone https://github.com/pnnbao97/VieNeu-TTS.git VieNeu-TTS-repo
 ### 3.2 Copy Your Dataset into the Cloned Repo
 
 ```bash
+# Create the dataset directory first (it doesn't exist in the cloned repo)
+mkdir -p /workspace/VieNeu-TTS-repo/finetune/dataset
+
 # Copy your uploaded dataset into the repo structure
 cp /workspace/VieNeu-TTS/finetune/dataset/metadata.csv /workspace/VieNeu-TTS-repo/finetune/dataset/metadata.csv
 # If you uploaded raw_audio directly:
@@ -221,7 +224,7 @@ The config file is at `finetune/configs/lora_config.py`. The defaults are good f
 | `model` | `pnnbao-ump/VieNeu-TTS-0.3B` | Base model |
 | `max_steps` | `5000` | Good for a single voice. Increase for more data |
 | `learning_rate` | `2e-4` | Standard LoRA learning rate |
-| `per_device_train_batch_size` | `2` | RTX 5080 (16GB) can handle batch size 2-4 |
+| `per_device_train_batch_size` | `1` | RTX 5080 (16GB); effective batch=2 via gradient accumulation |
 | `bf16` | `True` | Uses BFloat16 for memory efficiency |
 
 ### 5.2 (Optional) Adjust Config
@@ -234,7 +237,7 @@ nano finetune/configs/lora_config.py
 ```
 
 Suggested adjustments for RTX 5080:
-- `per_device_train_batch_size`: Try `4` (if you get OOM, go back to `2`)
+- `per_device_train_batch_size`: Keep at `1` (use `gradient_accumulation_steps` to increase effective batch size)
 - `max_steps`: With ~7000 samples, `5000-8000` steps is reasonable
 - `save_steps`: `500` (saves checkpoints every 500 steps)
 
@@ -550,7 +553,7 @@ tar -czf lora_output.tar.gz finetune/output/
 
 | Problem | Solution |
 |---|---|
-| `CUDA out of memory` | Reduce `per_device_train_batch_size` to 1 in `finetune/configs/lora_config.py` |
+| `CUDA out of memory` | Already optimized: batch_size=1, gradient checkpointing, dynamic padding. If still OOM, try adding `'use_4bit': True` in config |
 | `FileNotFoundError: metadata_cleaned.csv` | Run `filter_data.py` first |
 | `FileNotFoundError: metadata_encoded.csv` | Run `encode_data.py` first |
 | `encode_data.py` is slow | It's processing on GPU. With 2000 samples it takes ~10-30 minutes |
