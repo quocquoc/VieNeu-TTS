@@ -18,11 +18,11 @@
 
 | Model | Est. VRAM |
 |---|---|
-| Qwen3-ASR-0.6B (bf16) | ~1.5 GB |
+| Qwen3-ASR-1.7B (bf16) | ~4 GB |
 | VieNeu-TTS-0.3B merged (LMDeploy, bf16) | ~1.2 GB |
 | NeuCodec decoder (Triton-compiled) | ~0.3 GB |
 | LMDeploy KV cache + runtime | ~3 GB |
-| **Total** | **~6 GB** (18 GB free for headroom) |
+| **Total** | **~8.5 GB** (15.5 GB free for headroom) |
 
 ---
 
@@ -43,7 +43,12 @@ pip install -U qwen-asr
 pip install -U google-genai
 
 # 4. VieNeu-TTS with GPU-optimized inference (LMDeploy)
-pip install -q transformers peft torch librosa soundfile tqdm sea-g2p
+pip install -q transformers peft librosa soundfile tqdm sea-g2p
+
+# 4a. Install torch + torchaudio for CUDA 12.8 (RTX 3090 Ti server)
+#     (neucodec requires torchaudio — must match the CUDA runtime on the server)
+pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
+
 pip install -q git+https://github.com/Neuphonic/NeuCodec.git
 pip install -q lmdeploy triton
 
@@ -74,17 +79,31 @@ The merged model file is `merged_model.tar.gz` (~431 MB). From your **local mach
 scp -P <PORT> finetune/finetune_results/merged_model.tar.gz root@<HOST>:/workspace/VieNeu-TTS-repo/
 ```
 
-### Step 3: Extract the model on the server
+### Step 3: Re-merge the model with correct precision (bfloat16)
+
+> **Important:** The merge script previously used `float16` which caused audio quality issues.
+> You must re-merge with `bfloat16` on the server (requires the LoRA adapter).
 
 ```bash
 cd /workspace/VieNeu-TTS-repo
 
-# Extract — this creates finetune/output/merged_model/ with model files
-tar -xzf merged_model.tar.gz
+# Re-merge with bfloat16 precision (fixes audio quality)
+python finetune/merge_lora.py \
+  --base_model pnnbao-ump/VieNeu-TTS-0.3B \
+  --adapter finetune/output/VieNeu-TTS-0.3B-LoRA \
+  --output finetune/output/merged_model
 
-# Verify the model files are in place
+# Create voices.json for the merged model (encodes your reference audio as voice preset)
+python finetune/create_voices_json.py \
+  --audio finetune/output/en_0176.wav \
+  --text "The tiger woke up early every morning and walked all the way to the zoo." \
+  --name my_custom_voice \
+  --description "My fine-tuned voice" \
+  --output finetune/output/merged_model/voices.json
+
+# Verify all files are in place
 ls finetune/output/merged_model/
-# Expected: config.json  generation_config.json  model.safetensors  tokenizer.json  tokenizer_config.json
+# Expected: config.json  generation_config.json  model.safetensors  tokenizer.json  tokenizer_config.json  voices.json
 
 # Clean up the archive to save disk space
 rm merged_model.tar.gz
@@ -120,7 +139,7 @@ import torch
 print("Loading Qwen3-ASR...")
 from qwen_asr import Qwen3ASRModel
 asr = Qwen3ASRModel.from_pretrained(
-    "Qwen/Qwen3-ASR-0.6B",
+    "Qwen/Qwen3-ASR-1.7B",
     dtype=torch.bfloat16,
     device_map="cuda:0",
 )
@@ -131,7 +150,7 @@ print("Loading VieNeu-TTS...")
 import sys, os
 sys.path.insert(0, os.path.join(os.getcwd(), "src"))
 from vieneu import Vieneu
-tts = Vieneu(mode="fast", backbone_repo="finetune/output/merged_model")
+tts = Vieneu(mode="standard", backbone_repo="finetune/output/merged_model", backbone_device="cuda", codec_device="cuda")
 print("TTS loaded OK")
 
 # Check VRAM
@@ -179,26 +198,37 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
 # 1. Load Models (loaded once at startup)
 # ============================================================
 
-print("Loading Qwen3-ASR-0.6B...")
+print("Loading Qwen3-ASR-1.7B...")
 from qwen_asr import Qwen3ASRModel
 asr_model = Qwen3ASRModel.from_pretrained(
-    "Qwen/Qwen3-ASR-0.6B",
+    "Qwen/Qwen3-ASR-1.7B",
     dtype=torch.bfloat16,
     device_map="cuda:0",
     max_new_tokens=256,
 )
 print("ASR model loaded.")
 
-print("Loading VieNeu-TTS merged model (LMDeploy fast mode)...")
+print("Loading VieNeu-TTS merged model...")
 from vieneu import Vieneu
 tts_model = Vieneu(
-    mode="fast",
+    mode="standard",
     backbone_repo="finetune/output/merged_model",
-    memory_util=0.4,
-    enable_prefix_caching=True,
-    enable_triton=True,
+    backbone_device="cuda",
+    codec_device="cuda",
 )
 print("TTS model loaded.")
+
+# Load the default preset voice (ref_codes + ref_text) once at startup
+try:
+    default_voice = tts_model.get_preset_voice()
+    print(f"Default voice loaded OK")
+except Exception as e:
+    print(f"WARNING: No preset voice found: {e}")
+    print("Falling back to encoding reference audio directly...")
+    ref_codes = tts_model.encode_reference("finetune/output/en_0006.wav")
+    ref_text = "My teacher Tuan told us an amazing story about a brave little rabbit in the forest."
+    default_voice = {"codes": ref_codes, "text": ref_text}
+    print("Reference voice encoded OK")
 
 # Check VRAM
 mem_gb = torch.cuda.memory_allocated() / 1024**3
@@ -336,13 +366,13 @@ def audio_chunk_to_wav_bytes(audio: np.ndarray) -> bytes:
 
 def text_to_speech(text: str) -> bytes:
     """Convert text to speech WAV bytes using VieNeu-TTS (non-streaming fallback)."""
-    audio = tts_model.infer(text)
+    audio = tts_model.infer(text, voice=default_voice)
     return audio_chunk_to_wav_bytes(audio)
 
 
 def text_to_speech_stream(text: str):
     """Stream TTS audio chunks for faster time-to-first-audio."""
-    for audio_chunk in tts_model.infer_stream(text):
+    for audio_chunk in tts_model.infer_stream(text, voice=default_voice):
         yield audio_chunk_to_wav_bytes(audio_chunk)
 
 
@@ -402,19 +432,27 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await websocket.send_text(json.dumps({
                     "type": "status", "text": "Đang tạo giọng nói..."
                 }))
-                chunk_idx = 0
-                for audio_chunk in text_to_speech_stream(assistant_text):
-                    audio_b64 = base64.b64encode(audio_chunk).decode("utf-8")
+                try:
+                    chunk_idx = 0
+                    for audio_chunk in text_to_speech_stream(assistant_text):
+                        audio_b64 = base64.b64encode(audio_chunk).decode("utf-8")
+                        await websocket.send_text(json.dumps({
+                            "type": "audio_chunk",
+                            "data": audio_b64,
+                            "index": chunk_idx,
+                        }))
+                        chunk_idx += 1
+                    # Signal end of audio stream
                     await websocket.send_text(json.dumps({
-                        "type": "audio_chunk",
-                        "data": audio_b64,
-                        "index": chunk_idx,
+                        "type": "audio_end"
                     }))
-                    chunk_idx += 1
-                # Signal end of audio stream
-                await websocket.send_text(json.dumps({
-                    "type": "audio_end"
-                }))
+                except Exception as e:
+                    print(f"TTS ERROR: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    await websocket.send_text(json.dumps({
+                        "type": "error", "text": f"Lỗi TTS: {str(e)}"
+                    }))
 
             elif message["type"] == "reset":
                 conversation_history.pop(session_id, None)
@@ -799,7 +837,7 @@ python -m uvicorn demo_server:app --host 0.0.0.0 --port 8000
 
 **Expected startup output:**
 ```
-Loading Qwen3-ASR-0.6B...
+Loading Qwen3-ASR-1.7B...
 ASR model loaded.
 Loading VieNeu-TTS merged model...
 TTS model loaded.
@@ -949,13 +987,13 @@ model="gemini-2.5-pro"      # smarter, slower
 model="gemini-2.5-flash"    # fast, default
 ```
 
-### Use the Larger ASR Model (better accuracy)
+### Use the Smaller ASR Model (save VRAM)
 
-If VRAM allows, switch to the 1.7B model:
+If you need to free up VRAM, switch to the 0.6B model:
 
 ```python
 asr_model = Qwen3ASRModel.from_pretrained(
-    "Qwen/Qwen3-ASR-1.7B",  # ~4 GB VRAM instead of ~1.5 GB
+    "Qwen/Qwen3-ASR-0.6B",  # ~1.5 GB VRAM instead of ~4 GB
     ...
 )
 ```
@@ -971,9 +1009,10 @@ asr_model = Qwen3ASRModel.from_pretrained(
 | `cloudflared` connection refused | Make sure uvicorn is running on port 8000 before starting the tunnel |
 | Tunnel URL not reachable | Wait 10-15 seconds after starting. If still down, restart `cloudflared` |
 | WebSocket fails over tunnel | Cloudflare supports WebSocket by default. Check browser console for errors |
-| CUDA OOM when both models load | Use Qwen3-ASR-0.6B (smaller). Check no other processes use GPU: `nvidia-smi` |
+| CUDA OOM when both models load | Check no other processes use GPU: `nvidia-smi`. If needed, switch to Qwen3-ASR-0.6B (~1.5 GB) to save VRAM |
 | Audio not playing in browser | Check browser allows autoplay. Try clicking the page first |
 | WebSocket disconnects | Check Vast.ai port mapping. Ensure port 8000 is open |
+| `libcudart.so` / torchaudio error | CUDA version mismatch. Reinstall: `pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128` (replace `cu124` with your CUDA version) |
 | `qwen-asr` import error | Run `pip install -U qwen-asr` |
 | `google.genai` import error | Run `pip install -U google-genai` |
 | ASR returns empty text | Ensure you speak clearly and audio is at least 1 second |

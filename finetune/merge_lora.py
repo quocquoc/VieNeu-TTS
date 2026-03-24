@@ -8,7 +8,7 @@ def merge_lora(base_model_path, adapter_path, output_path):
     print(f"Loading base model from {base_model_path}...")
     base_model = AutoModelForCausalLM.from_pretrained(
         base_model_path,
-        torch_dtype=torch.float16,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
         trust_remote_code=True
     )

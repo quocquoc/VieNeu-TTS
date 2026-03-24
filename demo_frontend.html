@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VieNeu AI Voice Assistant</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f0f23;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .header {
+            padding: 30px 20px 10px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 24px;
+            color: #7dd3fc;
+        }
+        .header p {
+            font-size: 14px;
+            color: #888;
+            margin-top: 6px;
+        }
+        .chat-container {
+            flex: 1;
+            width: 100%;
+            max-width: 700px;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .message {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 16px;
+            font-size: 15px;
+            line-height: 1.5;
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .message.user {
+            align-self: flex-end;
+            background: #1e40af;
+            color: #dbeafe;
+            border-bottom-right-radius: 4px;
+        }
+        .message.assistant {
+            align-self: flex-start;
+            background: #1e293b;
+            color: #e2e8f0;
+            border-bottom-left-radius: 4px;
+        }
+        .message.status {
+            align-self: center;
+            background: transparent;
+            color: #666;
+            font-size: 13px;
+            padding: 4px;
+        }
+        .message.error {
+            align-self: center;
+            color: #f87171;
+            font-size: 13px;
+        }
+        .controls {
+            padding: 20px;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            justify-content: center;
+        }
+        .record-btn {
+            width: 72px;
+            height: 72px;
+            border-radius: 50%;
+            border: 3px solid #334155;
+            background: #1e293b;
+            color: #7dd3fc;
+            font-size: 28px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .record-btn:hover { border-color: #7dd3fc; }
+        .record-btn.recording {
+            background: #dc2626;
+            border-color: #f87171;
+            color: white;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.4); }
+            50% { box-shadow: 0 0 0 16px rgba(220,38,38,0); }
+        }
+        .reset-btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            background: #1e293b;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .reset-btn:hover { border-color: #7dd3fc; color: #7dd3fc; }
+        .footer {
+            padding: 10px;
+            color: #444;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>VieNeu AI Voice Assistant</h1>
+        <p>Qwen3-ASR + Gemini + VieNeu-TTS</p>
+    </div>
+
+    <div class="chat-container" id="chat"></div>
+
+    <div class="controls">
+        <button class="reset-btn" onclick="resetChat()">Xoa lich su</button>
+        <button class="record-btn" id="recordBtn" onclick="toggleRecording()">&#127908;</button>
+    </div>
+
+    <div class="footer">Hold button or press Space to talk</div>
+
+    <script>
+        const sessionId = crypto.randomUUID();
+        const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const wsUrl = `${wsProtocol}//${location.host}/ws/${sessionId}`;
+        let ws = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+
+
+        function connect() {
+            ws = new WebSocket(wsUrl);
+            ws.onopen = () => addMessage("status", "Da ket noi.");
+            ws.onclose = () => {
+                addMessage("status", "Mat ket noi. Dang thu ket noi lai...");
+                setTimeout(connect, 2000);
+            };
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                switch (msg.type) {
+                    case "user_text":
+                        addMessage("user", msg.text);
+                        break;
+                    case "assistant_text":
+                        addMessage("assistant", msg.text);
+                        break;
+                    case "status":
+                        addMessage("status", msg.text);
+                        break;
+                    case "error":
+                        addMessage("error", msg.text);
+                        break;
+                    case "audio":
+                        playAudio(msg.data);
+                        break;
+                }
+            };
+        }
+
+        function addMessage(type, text) {
+            const chat = document.getElementById("chat");
+            // Remove previous status messages
+            if (type === "status") {
+                chat.querySelectorAll(".message.status").forEach(el => el.remove());
+            }
+            const div = document.createElement("div");
+            div.className = `message ${type}`;
+            div.textContent = text;
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function playAudio(base64Data) {
+            const bytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+            const blob = new Blob([bytes], { type: "audio/wav" });
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.play();
+            audio.onended = () => URL.revokeObjectURL(url);
+        }
+
+        async function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                await startRecording();
+            }
+        }
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { sampleRate: 16000, channelCount: 1 }
+                });
+                audioChunks = [];
+                mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) audioChunks.push(e.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    stream.getTracks().forEach(t => t.stop());
+                    const webmBlob = new Blob(audioChunks, { type: "audio/webm" });
+                    const wavBytes = await convertToWav(webmBlob);
+                    const b64 = arrayBufferToBase64(wavBytes);
+                    ws.send(JSON.stringify({ type: "audio", data: b64 }));
+                };
+
+                mediaRecorder.start();
+                isRecording = true;
+                document.getElementById("recordBtn").classList.add("recording");
+                document.getElementById("recordBtn").innerHTML = "&#9632;";
+            } catch (err) {
+                addMessage("error", "Khong the truy cap microphone: " + err.message);
+            }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== "inactive") {
+                mediaRecorder.stop();
+            }
+            isRecording = false;
+            document.getElementById("recordBtn").classList.remove("recording");
+            document.getElementById("recordBtn").innerHTML = "&#127908;";
+        }
+
+        // Convert WebM to WAV using AudioContext
+        async function convertToWav(webmBlob) {
+            const arrayBuffer = await webmBlob.arrayBuffer();
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: 16000
+            });
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+            audioCtx.close();
+
+            const numSamples = audioBuffer.length;
+            const sampleRate = audioBuffer.sampleRate;
+            const buffer = new ArrayBuffer(44 + numSamples * 2);
+            const view = new DataView(buffer);
+            const channelData = audioBuffer.getChannelData(0);
+
+            // WAV header
+            writeString(view, 0, "RIFF");
+            view.setUint32(4, 36 + numSamples * 2, true);
+            writeString(view, 8, "WAVE");
+            writeString(view, 12, "fmt ");
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(view, 36, "data");
+            view.setUint32(40, numSamples * 2, true);
+
+            // PCM samples
+            for (let i = 0; i < numSamples; i++) {
+                let s = Math.max(-1, Math.min(1, channelData[i]));
+                view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+            }
+            return buffer;
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        function arrayBufferToBase64(buffer) {
+            let binary = "";
+            const bytes = new Uint8Array(buffer);
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return btoa(binary);
+        }
+
+        function resetChat() {
+            ws.send(JSON.stringify({ type: "reset" }));
+            document.getElementById("chat").innerHTML = "";
+        }
+
+        // Spacebar to record
+        document.addEventListener("keydown", (e) => {
+            if (e.code === "Space" && !e.repeat && !isRecording) {
+                e.preventDefault();
+                startRecording();
+            }
+        });
+        document.addEventListener("keyup", (e) => {
+            if (e.code === "Space" && isRecording) {
+                e.preventDefault();
+                stopRecording();
+            }
+        });
+
+        connect();
+    </script>
+</body>
+</html>

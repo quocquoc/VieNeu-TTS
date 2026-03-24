@@ -433,8 +433,8 @@ To make your model usable without needing a reference audio every time:
 ```bash
 cd /workspace/VieNeu-TTS-repo
 python finetune/create_voices_json.py \
-  --audio finetune/dataset/raw_audio/vi_0001.wav \
-  --text "The exact text spoken in this audio file." \
+  --audio finetune/output/en_0006.wav \
+  --text "My teacher Tuan told us an amazing story about a brave little rabbit in the forest." \
   --name my_custom_voice \
   --description "My fine-tuned voice"
 ```

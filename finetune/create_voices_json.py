@@ -57,8 +57,8 @@ def create_voices_json(audio_path, text, voice_name, output_path="voices.json", 
             "presets": {}
         }
     
-    # Initialize TTS to get codec
-    tts = Vieneu()
+    # Initialize TTS with codec only (no backbone needed for encoding)
+    tts = Vieneu(backbone_repo="")
     
     # Encode the reference audio
     print("   Encoding audio...")

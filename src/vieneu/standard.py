@@ -115,12 +115,25 @@ class VieNeuTTS(BaseVieneuTTS):
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
 
-            self.backbone = AutoModelForCausalLM.from_pretrained(backbone_repo, token=hf_token).to(
+            # Use bfloat16 on CUDA for 2x faster inference + 50% less VRAM
+            is_cuda = backbone_device in ("cuda", "gpu") or backbone_device.startswith("cuda:")
+            load_dtype = torch.bfloat16 if is_cuda else None
+
+            # Use SDPA (Scaled Dot Product Attention) — built-in, no extra packages
+            attn_impl = "sdpa" if is_cuda else None
+
+            load_kwargs = {"token": hf_token}
+            if load_dtype:
+                load_kwargs["dtype"] = load_dtype
+            if attn_impl:
+                load_kwargs["attn_implementation"] = attn_impl
+
+            self.backbone = AutoModelForCausalLM.from_pretrained(backbone_repo, **load_kwargs).to(
                 torch.device(backbone_device)
             )
 
-            # Optional torch.compile for non-Windows/non-Mac platforms if desired
-            if os.getenv("VIENEU_COMPILE") == "1" and platform.system() == "Linux":
+            # torch.compile for kernel fusion speedup (Linux only, opt-out with VIENEU_NO_COMPILE=1)
+            if platform.system() == "Linux" and os.getenv("VIENEU_NO_COMPILE") != "1":
                 try:
                     logger.info("🚀 Compiling backbone model with torch.compile...")
                     self.backbone = torch.compile(self.backbone, mode="reduce-overhead")
@@ -269,7 +282,11 @@ class VieNeuTTS(BaseVieneuTTS):
             inputs = {k: v.to(self.backbone.device) for k, v in inputs.items()}
 
             speech_end_id = self.tokenizer.convert_tokens_to_ids("<|SPEECH_GENERATION_END|>")
-            with torch.no_grad():
+            with torch.no_grad(), torch.autocast(
+                device_type=self.backbone.device.type,
+                dtype=torch.bfloat16,
+                enabled=self.backbone.device.type == "cuda",
+            ):
                 output_tokens = self.backbone.generate(
                     **inputs,
                     max_length=self.max_context,
@@ -346,7 +363,11 @@ class VieNeuTTS(BaseVieneuTTS):
     def _infer_torch(self, prompt_ids: List[int], temperature: float = 1.0, top_k: int = 50) -> str:
         prompt_tensor = torch.tensor(prompt_ids).unsqueeze(0).to(self.backbone.device)
         speech_end_id = self.tokenizer.convert_tokens_to_ids("<|SPEECH_GENERATION_END|>")
-        with torch.no_grad():
+        with torch.no_grad(), torch.autocast(
+            device_type=self.backbone.device.type,
+            dtype=torch.bfloat16,
+            enabled=self.backbone.device.type == "cuda",
+        ):
             output_tokens = self.backbone.generate(
                 prompt_tensor,
                 max_length=self.max_context,
