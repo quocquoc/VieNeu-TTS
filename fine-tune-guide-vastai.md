@@ -354,16 +354,16 @@ Copy the `merged_model/` folder to your GPU server, then:
 from vieneu import Vieneu
 
 # Load from local merged model
-tts = Vieneu(backbone_repo="/path/to/merged_model")
+tts = Vieneu(backbone_repo="/workspace/VieNeu-TTS-repo/finetune/output/merged_model")
 
 # Generate speech (requires a reference audio for voice cloning)
 audio = tts.infer(
-    "Xin chao, toi la giong noi cua ban!",
-    ref_audio="path/to/reference.wav",
-    ref_text="Text matching the reference audio exactly."
+    "Trong tiếng Anh, “biển” là sea hoặc beach. Ví dụ: I go to the beach (Tôi đi tắm biển). Khi ở biển, chúng ta có thể nói: I swim (Tôi bơi) hoặc I play with sand (Tôi chơi cát).",
+    ref_audio="/workspace/VieNeu-TTS-repo/test_result_model/en_0006.wav",
+    ref_text="My teacher Tuan told us an amazing story about a brave little rabbit in the forest."
 )
 
-tts.save(audio, "output.wav")
+tts.save(audio, "long_mix_output.wav")
 ```
 
 ### 9.3 Option B: Use LoRA Adapter
