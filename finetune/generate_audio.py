@@ -37,8 +37,8 @@ OUTPUT_FORMAT = "wav_44100"
 
 BASE_URL = f"https://api.elevenlabs.io/v1/text-to-speech/{VOICE_ID}"
 
-METADATA_CSV = Path("finetune/dataset/metadata.csv")
-OUTPUT_DIR = Path("finetune/dataset/raw_audio")
+METADATA_CSV = Path(__file__).parent / "dataset" / "metadata_2.csv"
+OUTPUT_DIR = Path(__file__).parent / "dataset" / "raw_audio"
 
 # Voice settings tuned for clear, warm teaching voice
 VOICE_SETTINGS = {

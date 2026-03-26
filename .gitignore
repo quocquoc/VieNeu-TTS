@@ -16,6 +16,7 @@ outputs/
 # Finetune Data & Checkpoints
 finetune/dataset/raw_audio/
 finetune/dataset/raw_audio_en_normal_speech/
+finetune/dataset/raw_audio_enslowly_speech
 finetune/output/
 
 # Merged Models
