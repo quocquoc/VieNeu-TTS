@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>VieNeu AI Voice Assistant</title>
+    <title>VieNeu AI Voice Assistant v2</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -27,6 +27,34 @@
             font-size: 14px;
             color: #888;
             margin-top: 6px;
+        }
+        .mode-toggle {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            justify-content: center;
+        }
+        .mode-btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            background: #1e293b;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .mode-btn:hover { border-color: #7dd3fc; color: #7dd3fc; }
+        .mode-btn.active {
+            background: #1e40af;
+            border-color: #3b82f6;
+            color: #dbeafe;
+        }
+        .mode-desc {
+            font-size: 12px;
+            color: #666;
+            margin-top: 6px;
+            text-align: center;
         }
         .chat-container {
             flex: 1;
@@ -107,6 +135,26 @@
             color: #fbbf24;
             font-weight: 500;
         }
+        .message.assistant .replay-bar {
+            margin-top: 8px;
+            display: flex;
+            gap: 6px;
+        }
+        .replay-btn {
+            background: #334155;
+            border: none;
+            border-radius: 6px;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 4px 10px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .replay-btn:hover { background: #475569; color: #7dd3fc; }
+        .replay-btn.playing { color: #7dd3fc; background: #1e40af; }
         .message.status {
             align-self: center;
             background: transparent;
@@ -170,8 +218,14 @@
 </head>
 <body>
     <div class="header">
-        <h1>VieNeu AI Voice Assistant</h1>
-        <p>Qwen3-ASR + Gemini + VieNeu-TTS</p>
+        <h1>VieNeu AI Voice Assistant v2</h1>
+        <p>Qwen3-ASR + Gemini + Dual TTS</p>
+        <div class="mode-toggle">
+            <button class="mode-btn active" id="btnSingle" onclick="setMode('single')">Single TTS</button>
+            <button class="mode-btn" id="btnDual" onclick="setMode('dual')">Dual TTS</button>
+            <button class="mode-btn" id="btnDual2" onclick="setMode('dual2')">Dual TTS 2</button>
+        </div>
+        <div class="mode-desc" id="modeDesc">Merged model (VI only)</div>
     </div>
 
     <div class="chat-container" id="chat"></div>
@@ -191,7 +245,25 @@
         let mediaRecorder = null;
         let audioChunks = [];
         let isRecording = false;
+        let ttsMode = "single"; // "single" or "dual"
+        let audioQueue = [];
+        let isPlayingAudio = false;
+        let lastAssistantDiv = null;  // track latest assistant message for attaching replay buttons
+        let lastAssistantAudios = []; // audio data for the latest assistant message
 
+        const modeDescriptions = {
+            single: "Merged model (VI only)",
+            dual: "Merged model (VI) + Qwen3-TTS (EN)",
+            dual2: "VieNeu-TTS 0.5B base (VI) + Qwen3-TTS (EN)",
+        };
+
+        function setMode(mode) {
+            ttsMode = mode;
+            document.getElementById("btnSingle").classList.toggle("active", mode === "single");
+            document.getElementById("btnDual").classList.toggle("active", mode === "dual");
+            document.getElementById("btnDual2").classList.toggle("active", mode === "dual2");
+            document.getElementById("modeDesc").textContent = modeDescriptions[mode];
+        }
 
         function connect() {
             ws = new WebSocket(wsUrl);
@@ -216,7 +288,7 @@
                         addMessage("error", msg.text);
                         break;
                     case "audio":
-                        playAudio(msg.data);
+                        enqueueAudio(msg.data, msg.lang || null);
                         break;
                 }
             };
@@ -224,7 +296,6 @@
 
         function addMessage(type, text) {
             const chat = document.getElementById("chat");
-            // Remove previous status messages
             if (type === "status") {
                 chat.querySelectorAll(".message.status").forEach(el => el.remove());
             }
@@ -258,9 +329,16 @@
                 html += `<div class="practice-q">${escapeHtml(msg.practice_question)}</div>`;
             }
 
+            // Placeholder for replay buttons (will be populated when audio arrives)
+            html += `<div class="replay-bar"></div>`;
+
             div.innerHTML = html;
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
+
+            // Track this as the latest assistant message for audio attachment
+            lastAssistantDiv = div;
+            lastAssistantAudios = [];
         }
 
         function escapeHtml(text) {
@@ -269,13 +347,91 @@
             return d.innerHTML;
         }
 
-        function playAudio(base64Data) {
-            const bytes = Uint8Array.from(atob(base64Data), c => c.charCodeAt(0));
+        // Audio queue: plays audio clips in order (important for dual mode: VI then EN)
+        function enqueueAudio(base64Data, lang) {
+            audioQueue.push({ data: base64Data, lang: lang });
+
+            // Attach replay button to the latest assistant message
+            if (lastAssistantDiv) {
+                lastAssistantAudios.push({ data: base64Data, lang: lang });
+                updateReplayBar(lastAssistantDiv, [...lastAssistantAudios]);
+            }
+
+            if (!isPlayingAudio) {
+                playNextAudio();
+            }
+        }
+
+        function updateReplayBar(msgDiv, audios) {
+            const bar = msgDiv.querySelector(".replay-bar");
+            if (!bar) return;
+            bar.innerHTML = "";
+
+            if (audios.length === 1) {
+                // Single audio — one replay button
+                const btn = createReplayBtn("Replay", audios.map(a => a.data));
+                bar.appendChild(btn);
+            } else {
+                // Dual mode — individual + play all buttons
+                audios.forEach((a) => {
+                    const label = a.lang === "vi" ? "VI" : a.lang === "en" ? "EN" : "Replay";
+                    const btn = createReplayBtn(label, [a.data]);
+                    bar.appendChild(btn);
+                });
+                const allBtn = createReplayBtn("All", audios.map(a => a.data));
+                bar.appendChild(allBtn);
+            }
+        }
+
+        function createReplayBtn(label, audioDataArray) {
+            const btn = document.createElement("button");
+            btn.className = "replay-btn";
+            btn.innerHTML = `&#9654; ${label}`;
+            btn.onclick = () => replayAudios(btn, audioDataArray);
+            return btn;
+        }
+
+        function replayAudios(btn, audioDataArray, index = 0) {
+            if (index >= audioDataArray.length) {
+                btn.classList.remove("playing");
+                return;
+            }
+            btn.classList.add("playing");
+            const bytes = Uint8Array.from(atob(audioDataArray[index]), c => c.charCodeAt(0));
             const blob = new Blob([bytes], { type: "audio/wav" });
             const url = URL.createObjectURL(blob);
             const audio = new Audio(url);
-            audio.play();
-            audio.onended = () => URL.revokeObjectURL(url);
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                replayAudios(btn, audioDataArray, index + 1);
+            };
+            audio.onerror = () => {
+                URL.revokeObjectURL(url);
+                btn.classList.remove("playing");
+            };
+            audio.play().catch(() => btn.classList.remove("playing"));
+        }
+
+        function playNextAudio() {
+            if (audioQueue.length === 0) {
+                isPlayingAudio = false;
+                return;
+            }
+            isPlayingAudio = true;
+            const item = audioQueue.shift();
+            const bytes = Uint8Array.from(atob(item.data), c => c.charCodeAt(0));
+            const blob = new Blob([bytes], { type: "audio/wav" });
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                playNextAudio();
+            };
+            audio.onerror = () => {
+                URL.revokeObjectURL(url);
+                playNextAudio();
+            };
+            audio.play().catch(() => playNextAudio());
         }
 
         async function toggleRecording() {
@@ -303,7 +459,7 @@
                     const webmBlob = new Blob(audioChunks, { type: "audio/webm" });
                     const wavBytes = await convertToWav(webmBlob);
                     const b64 = arrayBufferToBase64(wavBytes);
-                    ws.send(JSON.stringify({ type: "audio", data: b64 }));
+                    ws.send(JSON.stringify({ type: "audio", data: b64, tts_mode: ttsMode }));
                 };
 
                 mediaRecorder.start();
@@ -324,7 +480,6 @@
             document.getElementById("recordBtn").innerHTML = "&#127908;";
         }
 
-        // Convert WebM to WAV using AudioContext
         async function convertToWav(webmBlob) {
             const arrayBuffer = await webmBlob.arrayBuffer();
             const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
@@ -339,7 +494,6 @@
             const view = new DataView(buffer);
             const channelData = audioBuffer.getChannelData(0);
 
-            // WAV header
             writeString(view, 0, "RIFF");
             view.setUint32(4, 36 + numSamples * 2, true);
             writeString(view, 8, "WAVE");
@@ -354,7 +508,6 @@
             writeString(view, 36, "data");
             view.setUint32(40, numSamples * 2, true);
 
-            // PCM samples
             for (let i = 0; i < numSamples; i++) {
                 let s = Math.max(-1, Math.min(1, channelData[i]));
                 view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
@@ -380,6 +533,8 @@
         function resetChat() {
             ws.send(JSON.stringify({ type: "reset" }));
             document.getElementById("chat").innerHTML = "";
+            audioQueue = [];
+            isPlayingAudio = false;
         }
 
         // Spacebar to record
