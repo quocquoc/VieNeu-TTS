@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VieNeu AI Voice Assistant v3 (Optimized)</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            background: #0f0f23;
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+        .header {
+            padding: 30px 20px 10px;
+            text-align: center;
+        }
+        .header h1 {
+            font-size: 24px;
+            color: #7dd3fc;
+        }
+        .header p {
+            font-size: 14px;
+            color: #888;
+            margin-top: 6px;
+        }
+        .opt-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+            margin: 2px;
+        }
+        .opt-badge.on { background: #166534; color: #86efac; }
+        .opt-badge.off { background: #7f1d1d; color: #fca5a5; }
+        .opt-bar {
+            margin-top: 8px;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 4px;
+            justify-content: center;
+            max-width: 500px;
+        }
+        .mode-toggle {
+            display: flex;
+            gap: 8px;
+            margin-top: 12px;
+            justify-content: center;
+        }
+        .mode-btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            background: #1e293b;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+        }
+        .mode-btn:hover { border-color: #7dd3fc; color: #7dd3fc; }
+        .mode-btn.active {
+            background: #1e40af;
+            border-color: #3b82f6;
+            color: #dbeafe;
+        }
+        .mode-desc {
+            font-size: 12px;
+            color: #666;
+            margin-top: 6px;
+            text-align: center;
+        }
+        .chat-container {
+            flex: 1;
+            width: 100%;
+            max-width: 700px;
+            padding: 20px;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        .message {
+            max-width: 80%;
+            padding: 12px 16px;
+            border-radius: 16px;
+            font-size: 15px;
+            line-height: 1.5;
+            animation: fadeIn 0.3s ease;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(8px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .message.user {
+            align-self: flex-end;
+            background: #1e40af;
+            color: #dbeafe;
+            border-bottom-right-radius: 4px;
+        }
+        .message.assistant {
+            align-self: flex-start;
+            background: #1e293b;
+            color: #e2e8f0;
+            border-bottom-left-radius: 4px;
+        }
+        .message.assistant .vi-text {
+            font-size: 15px;
+            margin-bottom: 6px;
+        }
+        .message.assistant .en-text {
+            font-size: 13px;
+            color: #7dd3fc;
+            font-style: italic;
+        }
+        .message.assistant .vocab-card {
+            margin-top: 8px;
+            padding: 8px 12px;
+            background: #0f172a;
+            border-radius: 8px;
+            border-left: 3px solid #7dd3fc;
+        }
+        .message.assistant .vocab-word {
+            font-size: 16px;
+            font-weight: 600;
+            color: #fbbf24;
+        }
+        .message.assistant .vocab-meaning {
+            font-size: 13px;
+            color: #94a3b8;
+            margin-top: 2px;
+        }
+        .message.assistant .vocab-example {
+            font-size: 13px;
+            color: #e2e8f0;
+            margin-top: 4px;
+        }
+        .message.assistant .vocab-example-vi {
+            font-size: 12px;
+            color: #7dd3fc;
+            font-style: italic;
+        }
+        .message.assistant .practice-q {
+            margin-top: 8px;
+            padding: 6px 10px;
+            background: #1e40af33;
+            border-radius: 6px;
+            font-size: 14px;
+            color: #fbbf24;
+            font-weight: 500;
+        }
+        .message.assistant .replay-bar {
+            margin-top: 8px;
+            display: flex;
+            gap: 6px;
+        }
+        .replay-btn {
+            background: #334155;
+            border: none;
+            border-radius: 6px;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 12px;
+            padding: 4px 10px;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .replay-btn:hover { background: #475569; color: #7dd3fc; }
+        .replay-btn.playing { color: #7dd3fc; background: #1e40af; }
+        .message.status {
+            align-self: center;
+            background: transparent;
+            color: #666;
+            font-size: 13px;
+            padding: 4px;
+        }
+        .message.error {
+            align-self: center;
+            color: #f87171;
+            font-size: 13px;
+        }
+        .timing-bar {
+            align-self: center;
+            display: flex;
+            gap: 8px;
+            padding: 4px 12px;
+            background: #1e293b;
+            border-radius: 6px;
+            font-size: 11px;
+            color: #64748b;
+            animation: fadeIn 0.3s ease;
+        }
+        .timing-bar span { white-space: nowrap; }
+        .timing-bar .t-label { color: #475569; }
+        .timing-bar .t-value { color: #94a3b8; font-weight: 600; }
+        .timing-bar .t-total { color: #7dd3fc; font-weight: 700; }
+        .controls {
+            padding: 20px;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            justify-content: center;
+        }
+        .record-btn {
+            width: 72px;
+            height: 72px;
+            border-radius: 50%;
+            border: 3px solid #334155;
+            background: #1e293b;
+            color: #7dd3fc;
+            font-size: 28px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .record-btn:hover { border-color: #7dd3fc; }
+        .record-btn.recording {
+            background: #dc2626;
+            border-color: #f87171;
+            color: white;
+            animation: pulse 1.5s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.4); }
+            50% { box-shadow: 0 0 0 16px rgba(220,38,38,0); }
+        }
+        .reset-btn {
+            padding: 10px 20px;
+            border-radius: 8px;
+            border: 1px solid #334155;
+            background: #1e293b;
+            color: #94a3b8;
+            cursor: pointer;
+            font-size: 14px;
+        }
+        .reset-btn:hover { border-color: #7dd3fc; color: #7dd3fc; }
+        .footer {
+            padding: 10px;
+            color: #444;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>VieNeu AI Voice Assistant v3</h1>
+        <p>Optimized for RTX 5080 Blackwell</p>
+        <div class="opt-bar" id="optBar">Loading optimizations...</div>
+        <div class="mode-toggle">
+            <button class="mode-btn active" id="btnSingle" onclick="setMode('single')">Single TTS</button>
+            <button class="mode-btn" id="btnDual" onclick="setMode('dual')">Dual TTS</button>
+            <button class="mode-btn" id="btnDual2" onclick="setMode('dual2')">Dual TTS 2</button>
+        </div>
+        <div class="mode-desc" id="modeDesc">Merged model (VI only) - LMDeploy fast</div>
+    </div>
+
+    <div class="chat-container" id="chat"></div>
+
+    <div class="controls">
+        <button class="reset-btn" onclick="resetChat()">Xoa lich su</button>
+        <button class="record-btn" id="recordBtn" onclick="toggleRecording()">&#127908;</button>
+    </div>
+
+    <div class="footer">Hold button or press Space to talk</div>
+
+    <script>
+        const sessionId = crypto.randomUUID();
+        const wsProtocol = location.protocol === "https:" ? "wss:" : "ws:";
+        const wsUrl = `${wsProtocol}//${location.host}/ws/${sessionId}`;
+        let ws = null;
+        let mediaRecorder = null;
+        let audioChunks = [];
+        let isRecording = false;
+        let ttsMode = "single";
+        let audioQueue = [];
+        let isPlayingAudio = false;
+        let lastAssistantDiv = null;
+        let lastAssistantAudios = [];
+
+        const modeDescriptions = {
+            single: "Merged model (VI only) - LMDeploy fast",
+            dual: "Merged model (VI) + Qwen3-TTS (EN) - CUDA graphs",
+            dual2: "VieNeu-TTS 0.5B base (VI) + Qwen3-TTS (EN)",
+        };
+
+        // Fetch optimization stats from server
+        async function loadOptStats() {
+            try {
+                const res = await fetch("/stats");
+                const data = await res.json();
+                const bar = document.getElementById("optBar");
+                const opts = data.optimizations;
+                bar.innerHTML = [
+                    badge("TF32", opts.tf32_matmul),
+                    badge(opts.attention === "flash_attention_2" ? "FlashAttn2" : "SDPA", true),
+                    badge("ASR: " + opts.asr_backend, opts.asr_backend === "vLLM"),
+                    badge("TTS: " + (opts.vieneu_engine.includes("fast") ? "LMDeploy" : "std"), opts.vieneu_engine.includes("fast")),
+                    badge("EN: " + (opts.qwen_tts_engine.includes("CUDA") ? "CUDAgraph" : "std"), opts.qwen_tts_engine.includes("CUDA")),
+                    `<span class="opt-badge on">GPU: ${data.gpu_name} (${data.vram_gb}GB)</span>`,
+                ].join("");
+            } catch (e) {
+                document.getElementById("optBar").innerHTML = '<span class="opt-badge off">Stats unavailable</span>';
+            }
+        }
+
+        function badge(label, isOn) {
+            return `<span class="opt-badge ${isOn ? 'on' : 'off'}">${label}</span>`;
+        }
+
+        function setMode(mode) {
+            ttsMode = mode;
+            document.getElementById("btnSingle").classList.toggle("active", mode === "single");
+            document.getElementById("btnDual").classList.toggle("active", mode === "dual");
+            document.getElementById("btnDual2").classList.toggle("active", mode === "dual2");
+            document.getElementById("modeDesc").textContent = modeDescriptions[mode];
+        }
+
+        function connect() {
+            ws = new WebSocket(wsUrl);
+            ws.onopen = () => addMessage("status", "Da ket noi.");
+            ws.onclose = () => {
+                addMessage("status", "Mat ket noi. Dang thu ket noi lai...");
+                setTimeout(connect, 2000);
+            };
+            ws.onmessage = (event) => {
+                const msg = JSON.parse(event.data);
+                switch (msg.type) {
+                    case "user_text":
+                        addMessage("user", msg.text);
+                        break;
+                    case "assistant_text":
+                        addBilingualMessage(msg);
+                        break;
+                    case "status":
+                        addMessage("status", msg.text);
+                        break;
+                    case "error":
+                        addMessage("error", msg.text);
+                        break;
+                    case "audio":
+                        enqueueAudio(msg.data, msg.lang || null);
+                        break;
+                    case "timings":
+                        showTimings(msg);
+                        break;
+                }
+            };
+        }
+
+        function addMessage(type, text) {
+            const chat = document.getElementById("chat");
+            if (type === "status") {
+                chat.querySelectorAll(".message.status").forEach(el => el.remove());
+            }
+            const div = document.createElement("div");
+            div.className = `message ${type}`;
+            div.textContent = text;
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function addBilingualMessage(msg) {
+            const chat = document.getElementById("chat");
+            const div = document.createElement("div");
+            div.className = "message assistant";
+
+            let html = "";
+            if (msg.vi) html += `<div class="vi-text">${escapeHtml(msg.vi)}</div>`;
+            if (msg.en) html += `<div class="en-text">${escapeHtml(msg.en)}</div>`;
+
+            if (msg.vocabulary) {
+                const v = msg.vocabulary;
+                html += `<div class="vocab-card">`;
+                html += `<div class="vocab-word">${escapeHtml(v.word)}</div>`;
+                html += `<div class="vocab-meaning">${escapeHtml(v.meaning)}</div>`;
+                html += `<div class="vocab-example">${escapeHtml(v.example)}</div>`;
+                if (v.example_vi) html += `<div class="vocab-example-vi">${escapeHtml(v.example_vi)}</div>`;
+                html += `</div>`;
+            }
+
+            if (msg.practice_question) {
+                html += `<div class="practice-q">${escapeHtml(msg.practice_question)}</div>`;
+            }
+
+            html += `<div class="replay-bar"></div>`;
+
+            div.innerHTML = html;
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+
+            lastAssistantDiv = div;
+            lastAssistantAudios = [];
+        }
+
+        function showTimings(msg) {
+            const chat = document.getElementById("chat");
+            // Remove previous timing bars
+            chat.querySelectorAll(".timing-bar").forEach(el => el.remove());
+            const div = document.createElement("div");
+            div.className = "timing-bar";
+            let parts = [];
+            if (msg.asr !== undefined) parts.push(`<span><span class="t-label">ASR:</span> <span class="t-value">${msg.asr}s</span></span>`);
+            if (msg.llm !== undefined) parts.push(`<span><span class="t-label">LLM:</span> <span class="t-value">${msg.llm}s</span></span>`);
+            if (msg.tts_vi !== undefined) parts.push(`<span><span class="t-label">TTS-VI:</span> <span class="t-value">${msg.tts_vi}s</span></span>`);
+            if (msg.tts_en !== undefined) parts.push(`<span><span class="t-label">TTS-EN:</span> <span class="t-value">${msg.tts_en}s</span></span>`);
+            if (msg.total !== undefined) parts.push(`<span><span class="t-label">Total:</span> <span class="t-total">${msg.total}s</span></span>`);
+            div.innerHTML = parts.join("");
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function escapeHtml(text) {
+            const d = document.createElement("div");
+            d.textContent = text;
+            return d.innerHTML;
+        }
+
+        function enqueueAudio(base64Data, lang) {
+            audioQueue.push({ data: base64Data, lang: lang });
+
+            if (lastAssistantDiv) {
+                lastAssistantAudios.push({ data: base64Data, lang: lang });
+                updateReplayBar(lastAssistantDiv, [...lastAssistantAudios]);
+            }
+
+            if (!isPlayingAudio) {
+                playNextAudio();
+            }
+        }
+
+        function updateReplayBar(msgDiv, audios) {
+            const bar = msgDiv.querySelector(".replay-bar");
+            if (!bar) return;
+            bar.innerHTML = "";
+
+            if (audios.length === 1) {
+                const btn = createReplayBtn("Replay", audios.map(a => a.data));
+                bar.appendChild(btn);
+            } else {
+                audios.forEach((a) => {
+                    const label = a.lang === "vi" ? "VI" : a.lang === "en" ? "EN" : "Replay";
+                    const btn = createReplayBtn(label, [a.data]);
+                    bar.appendChild(btn);
+                });
+                const allBtn = createReplayBtn("All", audios.map(a => a.data));
+                bar.appendChild(allBtn);
+            }
+        }
+
+        function createReplayBtn(label, audioDataArray) {
+            const btn = document.createElement("button");
+            btn.className = "replay-btn";
+            btn.innerHTML = `&#9654; ${label}`;
+            btn.onclick = () => replayAudios(btn, audioDataArray);
+            return btn;
+        }
+
+        function replayAudios(btn, audioDataArray, index = 0) {
+            if (index >= audioDataArray.length) {
+                btn.classList.remove("playing");
+                return;
+            }
+            btn.classList.add("playing");
+            const bytes = Uint8Array.from(atob(audioDataArray[index]), c => c.charCodeAt(0));
+            const blob = new Blob([bytes], { type: "audio/wav" });
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                replayAudios(btn, audioDataArray, index + 1);
+            };
+            audio.onerror = () => {
+                URL.revokeObjectURL(url);
+                btn.classList.remove("playing");
+            };
+            audio.play().catch(() => btn.classList.remove("playing"));
+        }
+
+        function playNextAudio() {
+            if (audioQueue.length === 0) {
+                isPlayingAudio = false;
+                return;
+            }
+            isPlayingAudio = true;
+            const item = audioQueue.shift();
+            const bytes = Uint8Array.from(atob(item.data), c => c.charCodeAt(0));
+            const blob = new Blob([bytes], { type: "audio/wav" });
+            const url = URL.createObjectURL(blob);
+            const audio = new Audio(url);
+            audio.onended = () => {
+                URL.revokeObjectURL(url);
+                playNextAudio();
+            };
+            audio.onerror = () => {
+                URL.revokeObjectURL(url);
+                playNextAudio();
+            };
+            audio.play().catch(() => playNextAudio());
+        }
+
+        async function toggleRecording() {
+            if (isRecording) {
+                stopRecording();
+            } else {
+                await startRecording();
+            }
+        }
+
+        async function startRecording() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    audio: { sampleRate: 16000, channelCount: 1 }
+                });
+                audioChunks = [];
+                mediaRecorder = new MediaRecorder(stream, { mimeType: "audio/webm;codecs=opus" });
+
+                mediaRecorder.ondataavailable = (e) => {
+                    if (e.data.size > 0) audioChunks.push(e.data);
+                };
+
+                mediaRecorder.onstop = async () => {
+                    stream.getTracks().forEach(t => t.stop());
+                    const webmBlob = new Blob(audioChunks, { type: "audio/webm" });
+                    const wavBytes = await convertToWav(webmBlob);
+                    const b64 = arrayBufferToBase64(wavBytes);
+                    ws.send(JSON.stringify({ type: "audio", data: b64, tts_mode: ttsMode }));
+                };
+
+                mediaRecorder.start();
+                isRecording = true;
+                document.getElementById("recordBtn").classList.add("recording");
+                document.getElementById("recordBtn").innerHTML = "&#9632;";
+            } catch (err) {
+                addMessage("error", "Khong the truy cap microphone: " + err.message);
+            }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== "inactive") {
+                mediaRecorder.stop();
+            }
+            isRecording = false;
+            document.getElementById("recordBtn").classList.remove("recording");
+            document.getElementById("recordBtn").innerHTML = "&#127908;";
+        }
+
+        async function convertToWav(webmBlob) {
+            const arrayBuffer = await webmBlob.arrayBuffer();
+            const audioCtx = new (window.AudioContext || window.webkitAudioContext)({
+                sampleRate: 16000
+            });
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+            audioCtx.close();
+
+            const numSamples = audioBuffer.length;
+            const sampleRate = audioBuffer.sampleRate;
+            const buffer = new ArrayBuffer(44 + numSamples * 2);
+            const view = new DataView(buffer);
+            const channelData = audioBuffer.getChannelData(0);
+
+            writeString(view, 0, "RIFF");
+            view.setUint32(4, 36 + numSamples * 2, true);
+            writeString(view, 8, "WAVE");
+            writeString(view, 12, "fmt ");
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            writeString(view, 36, "data");
+            view.setUint32(40, numSamples * 2, true);
+
+            for (let i = 0; i < numSamples; i++) {
+                let s = Math.max(-1, Math.min(1, channelData[i]));
+                view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+            }
+            return buffer;
+        }
+
+        function writeString(view, offset, string) {
+            for (let i = 0; i < string.length; i++) {
+                view.setUint8(offset + i, string.charCodeAt(i));
+            }
+        }
+
+        function arrayBufferToBase64(buffer) {
+            let binary = "";
+            const bytes = new Uint8Array(buffer);
+            for (let i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return btoa(binary);
+        }
+
+        function resetChat() {
+            ws.send(JSON.stringify({ type: "reset" }));
+            document.getElementById("chat").innerHTML = "";
+            audioQueue = [];
+            isPlayingAudio = false;
+        }
+
+        // Spacebar to record
+        document.addEventListener("keydown", (e) => {
+            if (e.code === "Space" && !e.repeat && !isRecording) {
+                e.preventDefault();
+                startRecording();
+            }
+        });
+        document.addEventListener("keyup", (e) => {
+            if (e.code === "Space" && isRecording) {
+                e.preventDefault();
+                stopRecording();
+            }
+        });
+
+        connect();
+        loadOptStats();
+    </script>
+</body>
+</html>
