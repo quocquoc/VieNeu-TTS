@@ -24,11 +24,24 @@ from fastapi.responses import HTMLResponse
 # ============================================================
 # 0. Blackwell / CUDA Optimizations (BEFORE any model loading)
 # ============================================================
+
+# vLLM needs 'spawn' multiprocessing to avoid "Cannot re-initialize CUDA in forked subprocess"
+os.environ.setdefault("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+# Force Triton attention backend — vLLM's bundled flash-attn PTX doesn't support Blackwell (SM 12.0)
+# Triton JIT-compiles for the current GPU, so it works on any architecture
+os.environ.setdefault("VLLM_ATTENTION_BACKEND", "TRITON_ATTN")
+
 import torch
 torch.set_float32_matmul_precision('high')  # Enable TF32 on Tensor Cores
 
 # Setup paths
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "src"))
+
+# Detect GPU compute capability
+GPU_SM = (0, 0)
+if torch.cuda.is_available():
+    GPU_SM = torch.cuda.get_device_capability(0)
+    print(f"GPU: {torch.cuda.get_device_name(0)}, SM {GPU_SM[0]}.{GPU_SM[1]}")
 
 # Detect if FlashAttention 2 is available
 ATTN_IMPL = "sdpa"  # safe default
@@ -38,6 +51,13 @@ try:
     print(f"FlashAttention 2 detected (v{flash_attn.__version__}), using flash_attention_2")
 except ImportError:
     print("FlashAttention 2 not installed, using SDPA (still fast)")
+
+# Check if LMDeploy supports this GPU
+# lmdeploy 0.12.1 does NOT have CUDA kernels for SM 100+ (Blackwell RTX 5080/5090)
+# It will crash with "no kernel image is available" — skip it entirely on Blackwell
+LMDEPLOY_SUPPORTED = GPU_SM[0] < 10  # SM 80 (Ampere), 89 (Ada), 90 (Hopper) are supported
+if not LMDEPLOY_SUPPORTED:
+    print(f"LMDeploy skipped: no SM {GPU_SM[0]}{GPU_SM[1]} kernel support in lmdeploy 0.12.x")
 
 # ============================================================
 # 1. Load Models (optimized for RTX 5080)
@@ -69,25 +89,29 @@ except Exception as e:
     )
     print("ASR model loaded (standard backend).")
 
-# --- VieNeu-TTS with LMDeploy Fast Mode (2-3x faster) ---
-print("Loading VieNeu-TTS merged model (LMDeploy fast mode)...")
+# --- VieNeu-TTS (LMDeploy fast mode if supported, otherwise standard with torch.compile) ---
 from vieneu import Vieneu
 
 USE_FAST_VIENEU = False
-try:
-    vieneu_tts = Vieneu(
-        mode="fast",
-        backbone_repo="finetune/output/merged_model",
-        backbone_device="cuda",
-        codec_device="cuda",
-        memory_util=0.2,
-        quant_policy=8,              # INT8 KV cache quantization
-        enable_prefix_caching=True,
-    )
-    USE_FAST_VIENEU = True
-    print("VieNeu-TTS model loaded (LMDeploy fast mode - optimized).")
-except Exception as e:
-    print(f"LMDeploy not available ({e}), falling back to standard mode...")
+if LMDEPLOY_SUPPORTED:
+    print("Loading VieNeu-TTS merged model (LMDeploy fast mode)...")
+    try:
+        vieneu_tts = Vieneu(
+            mode="fast",
+            backbone_repo="finetune/output/merged_model",
+            backbone_device="cuda",
+            codec_device="cuda",
+            memory_util=0.2,
+            quant_policy=8,              # INT8 KV cache quantization
+            enable_prefix_caching=True,
+        )
+        USE_FAST_VIENEU = True
+        print("VieNeu-TTS model loaded (LMDeploy fast mode - optimized).")
+    except Exception as e:
+        print(f"LMDeploy failed ({e}), falling back to standard mode...")
+
+if not USE_FAST_VIENEU:
+    print("Loading VieNeu-TTS merged model (standard mode + torch.compile)...")
     vieneu_tts = Vieneu(
         mode="standard",
         backbone_repo="finetune/output/merged_model",
@@ -101,22 +125,27 @@ VIENEU_REF_TEXT = "Con cừu rất lớn, chúng ta hãy cùng học tên của 
 print(f"VieNeu-TTS will use Vietnamese reference: {VIENEU_REF_AUDIO}")
 
 # --- VieNeu-TTS 0.5B base model (for "dual2" mode) ---
-print("Loading VieNeu-TTS-0.5B base model (LMDeploy fast mode)...")
 USE_FAST_VIENEU_05B = False
-try:
-    vieneu_tts_05b = Vieneu(
-        mode="fast",
-        backbone_repo="pnnbao-ump/VieNeu-TTS",
-        backbone_device="cuda",
-        codec_device="cuda",
-        memory_util=0.2,
-        quant_policy=8,
-        enable_prefix_caching=True,
-    )
-    USE_FAST_VIENEU_05B = True
-    print("VieNeu-TTS-0.5B base model loaded (LMDeploy fast mode).")
-except Exception as e:
-    print(f"LMDeploy not available for 0.5B ({e}), falling back to standard...")
+
+if LMDEPLOY_SUPPORTED:
+    print("Loading VieNeu-TTS-0.5B base model (LMDeploy fast mode)...")
+    try:
+        vieneu_tts_05b = Vieneu(
+            mode="fast",
+            backbone_repo="pnnbao-ump/VieNeu-TTS",
+            backbone_device="cuda",
+            codec_device="cuda",
+            memory_util=0.2,
+            quant_policy=8,
+            enable_prefix_caching=True,
+        )
+        USE_FAST_VIENEU_05B = True
+        print("VieNeu-TTS-0.5B base model loaded (LMDeploy fast mode).")
+    except Exception as e:
+        print(f"LMDeploy failed for 0.5B ({e}), falling back to standard mode...")
+
+if not USE_FAST_VIENEU_05B:
+    print("Loading VieNeu-TTS-0.5B base model (standard mode + torch.compile)...")
     vieneu_tts_05b = Vieneu(
         mode="standard",
         backbone_repo="pnnbao-ump/VieNeu-TTS",
@@ -182,13 +211,18 @@ except Exception as e:
 # Test Qwen3-TTS
 try:
     t0 = time.time()
-    test_wavs, test_sr = qwen_tts.generate_voice_clone(
+    # FasterQwen3TTS uses xvec_only; standard Qwen3TTSModel uses x_vector_only_mode
+    clone_kwargs = dict(
         text="Hello, this is a test.",
         language="English",
         ref_audio=QWEN_TTS_REF_AUDIO,
         ref_text=QWEN_TTS_REF_TEXT,
-        x_vector_only_mode=True,
     )
+    if USE_FASTER_QWEN_TTS:
+        clone_kwargs["xvec_only"] = True
+    else:
+        clone_kwargs["x_vector_only_mode"] = True
+    test_wavs, test_sr = qwen_tts.generate_voice_clone(**clone_kwargs)
     t_en = time.time() - t0
     duration_en = len(test_wavs[0]) / test_sr
     rtf_en = t_en / duration_en if duration_en > 0 else 0
@@ -437,13 +471,18 @@ def tts_qwen_en(text: str) -> bytes:
     print(f"[Qwen3-TTS] Generating: {text[:80]}...")
     t0 = time.time()
 
-    wavs, sr = qwen_tts.generate_voice_clone(
+    # FasterQwen3TTS uses xvec_only; standard Qwen3TTSModel uses x_vector_only_mode
+    clone_kwargs = dict(
         text=text,
         language="English",
         ref_audio=QWEN_TTS_REF_AUDIO,
         ref_text=QWEN_TTS_REF_TEXT,
-        x_vector_only_mode=True,
     )
+    if USE_FASTER_QWEN_TTS:
+        clone_kwargs["xvec_only"] = True
+    else:
+        clone_kwargs["x_vector_only_mode"] = True
+    wavs, sr = qwen_tts.generate_voice_clone(**clone_kwargs)
     audio = wavs[0]
     elapsed = time.time() - t0
     duration = len(audio) / sr

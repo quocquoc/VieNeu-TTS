@@ -2,6 +2,7 @@
 import os
 import sys
 import json
+import time
 import torch
 import base64
 import asyncio
@@ -404,12 +405,15 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 tts_mode = message.get("tts_mode", "single")  # "single", "dual", or "dual2"
 
                 loop = asyncio.get_event_loop()
+                timings = {}
 
                 # Step 1: ASR
                 await websocket.send_text(json.dumps({
                     "type": "status", "text": "Dang nhan dien giong noi..."
                 }))
+                t0 = time.time()
                 user_text = await loop.run_in_executor(None, speech_to_text, audio_bytes)
+                timings["asr"] = round(time.time() - t0, 2)
 
                 if not user_text:
                     await websocket.send_text(json.dumps({
@@ -425,9 +429,11 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                 await websocket.send_text(json.dumps({
                     "type": "status", "text": "Dang suy nghi..."
                 }))
+                t0 = time.time()
                 assistant_data = await loop.run_in_executor(
                     None, chat_with_gemini, user_text, session_id
                 )
+                timings["llm"] = round(time.time() - t0, 2)
 
                 await websocket.send_text(json.dumps({
                     "type": "assistant_text",
@@ -455,7 +461,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "type": "status", "text": f"Dang tao giong noi tieng Viet ({vi_tts_label})..."
                         }))
                         try:
+                            t0 = time.time()
                             vi_wav = await loop.run_in_executor(None, vi_tts_fn, vi_text)
+                            timings["tts_vi"] = round(time.time() - t0, 2)
                             vi_b64 = base64.b64encode(vi_wav).decode("utf-8")
                             await websocket.send_text(json.dumps({
                                 "type": "audio", "data": vi_b64, "lang": "vi"
@@ -473,7 +481,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "type": "status", "text": "Generating English voice..."
                         }))
                         try:
+                            t0 = time.time()
                             en_wav = await loop.run_in_executor(None, tts_qwen_en, en_text)
+                            timings["tts_en"] = round(time.time() - t0, 2)
                             en_b64 = base64.b64encode(en_wav).decode("utf-8")
                             await websocket.send_text(json.dumps({
                                 "type": "audio", "data": en_b64, "lang": "en"
@@ -494,7 +504,9 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             "type": "status", "text": "Dang tao giong noi..."
                         }))
                         try:
+                            t0 = time.time()
                             wav = await loop.run_in_executor(None, tts_vieneu, vi_text)
+                            timings["tts_vi"] = round(time.time() - t0, 2)
                             b64 = base64.b64encode(wav).decode("utf-8")
                             await websocket.send_text(json.dumps({
                                 "type": "audio", "data": b64
@@ -505,6 +517,14 @@ async def websocket_endpoint(websocket: WebSocket, session_id: str):
                             await websocket.send_text(json.dumps({
                                 "type": "error", "text": f"Loi TTS: {str(e)}"
                             }))
+
+                # Send timing info to frontend
+                total = sum(timings.values())
+                timings["total"] = round(total, 2)
+                await websocket.send_text(json.dumps({
+                    "type": "timings", **timings
+                }))
+                print(f"[Timings] {timings}")
 
             elif message["type"] == "reset":
                 conversation_history.pop(session_id, None)

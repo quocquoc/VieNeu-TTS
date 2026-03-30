@@ -167,6 +167,21 @@
             color: #f87171;
             font-size: 13px;
         }
+        .timing-bar {
+            align-self: center;
+            display: flex;
+            gap: 8px;
+            padding: 4px 12px;
+            background: #1e293b;
+            border-radius: 6px;
+            font-size: 11px;
+            color: #64748b;
+            animation: fadeIn 0.3s ease;
+        }
+        .timing-bar span { white-space: nowrap; }
+        .timing-bar .t-label { color: #475569; }
+        .timing-bar .t-value { color: #94a3b8; font-weight: 600; }
+        .timing-bar .t-total { color: #7dd3fc; font-weight: 700; }
         .controls {
             padding: 20px;
             display: flex;
@@ -290,6 +305,9 @@
                     case "audio":
                         enqueueAudio(msg.data, msg.lang || null);
                         break;
+                    case "timings":
+                        showTimings(msg);
+                        break;
                 }
             };
         }
@@ -302,6 +320,22 @@
             const div = document.createElement("div");
             div.className = `message ${type}`;
             div.textContent = text;
+            chat.appendChild(div);
+            chat.scrollTop = chat.scrollHeight;
+        }
+
+        function showTimings(msg) {
+            const chat = document.getElementById("chat");
+            chat.querySelectorAll(".timing-bar").forEach(el => el.remove());
+            const div = document.createElement("div");
+            div.className = "timing-bar";
+            let parts = [];
+            if (msg.asr !== undefined) parts.push(`<span><span class="t-label">ASR:</span> <span class="t-value">${msg.asr}s</span></span>`);
+            if (msg.llm !== undefined) parts.push(`<span><span class="t-label">LLM:</span> <span class="t-value">${msg.llm}s</span></span>`);
+            if (msg.tts_vi !== undefined) parts.push(`<span><span class="t-label">TTS-VI:</span> <span class="t-value">${msg.tts_vi}s</span></span>`);
+            if (msg.tts_en !== undefined) parts.push(`<span><span class="t-label">TTS-EN:</span> <span class="t-value">${msg.tts_en}s</span></span>`);
+            if (msg.total !== undefined) parts.push(`<span><span class="t-label">Total:</span> <span class="t-total">${msg.total}s</span></span>`);
+            div.innerHTML = parts.join("");
             chat.appendChild(div);
             chat.scrollTop = chat.scrollHeight;
         }

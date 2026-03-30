@@ -14,6 +14,8 @@
 
 All optimizations auto-detect: if a library (LMDeploy, faster-qwen3-tts, vLLM, flash-attn) is not installed, demo3 falls back to the standard engine automatically.
 
+> **RTX 5080 (Blackwell) note**: LMDeploy 0.12.1 does NOT have CUDA kernels for SM 100 (Blackwell). `demo3_server.py` auto-detects the GPU compute capability and skips LMDeploy on Blackwell, using standard VieNeu-TTS + `torch.compile` instead. The other optimizations (vLLM for ASR, faster-qwen3-tts for Qwen3-TTS, TF32, SDPA) all work on Blackwell.
+
 ## Architecture Overview
 
 ```
@@ -62,41 +64,71 @@ cd /workspace
 # 1. Core dependencies
 pip install -q fastapi uvicorn websockets python-multipart
 
-# 2. PyTorch with CUDA 12.8 (REQUIRED for RTX 5080 Blackwell)
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
-
-# Verify Blackwell is detected
-python -c "import torch; print(torch.cuda.get_device_name(0)); print(f'CUDA: {torch.version.cuda}'); print(f'Compute cap: {torch.cuda.get_device_capability(0)}')"
-# Expected: NVIDIA GeForce RTX 5080, CUDA: 12.8, Compute cap: (10, 0)
-
-# 3. Qwen3-ASR + vLLM backend (2-3x faster ASR)
-pip install -U qwen-asr
-pip install vllm --pre "vllm[audio]"
-
-# 4. Gemini API client
+# 2. Gemini API client
 pip install -U google-genai
 
-# 5. VieNeu-TTS dependencies
+# 3. Qwen3-ASR
+pip install -U qwen-asr
+
+# 4. VieNeu-TTS dependencies
 pip install -q transformers peft librosa soundfile tqdm sea-g2p
 pip install transformers==4.57.6
 pip install -q git+https://github.com/Neuphonic/NeuCodec.git
 
-# 6. LMDeploy (2-3x faster VieNeu-TTS inference)
-pip install lmdeploy
-
-# 7. faster-qwen3-tts (5-6x faster Qwen3-TTS with CUDA graphs)
+# 5. faster-qwen3-tts (5-6x faster Qwen3-TTS with CUDA graphs)
 pip install faster-qwen3-tts
 
-# 8. FlashAttention 2 for Blackwell (optional but recommended)
-# Pre-built wheel for RTX 5080:
-pip install flash-attn==2.7.4.post1
-# If the above fails, try building from source:
-# pip install flash-attn --no-build-isolation
-# Or skip — demo3 auto-falls back to SDPA which is also fast
-
-# 9. Audio processing
+# 6. Audio processing
 pip install -q numpy scipy
+
+# ================================================================
+# IMPORTANT: Install order matters! vLLM and lmdeploy have
+# conflicting torch requirements. Install them carefully:
+#   - vllm 0.18.0 requires torch==2.10.0
+#   - lmdeploy 0.12.1 requires torch<=2.8.0
+# Solution: install both with --no-deps, then fix torch last.
+# ================================================================
+
+# 7. vLLM backend for ASR (2-3x faster) — install with --no-deps
+pip install vllm --pre --no-deps
+pip install "vllm[audio]" --no-deps
+
+# 8. LMDeploy (2-3x faster VieNeu-TTS inference) — install with --no-deps
+pip install lmdeploy --no-deps
+pip install addict fire mmengine-lite shortuuid termcolor yapf
+
+# 9. Install correct torch + torchaudio + torchvision for CUDA 12.8
+# MUST install all three together in ONE command to prevent version conflicts
+# MUST come BEFORE flash-attn (which needs torch to build)
+pip install torch==2.10.0 torchaudio==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+
+# 10. FlashAttention 2 (OPTIONAL — skip if it fails)
+# Building from source requires 16-32GB RAM and takes 10-30 min.
+# If it fails (OOM/Killed), just skip — demo3 uses SDPA instead (built into PyTorch, still fast).
+# pip install flash-attn --no-build-isolation
+
+# 11. Verify everything works
+python -c "
+import torch
+print(f'torch={torch.__version__}, CUDA={torch.version.cuda}')
+print(f'GPU: {torch.cuda.get_device_name(0)}')
+print(f'Compute cap: {torch.cuda.get_device_capability(0)}')
+try:
+    from lmdeploy import pipeline; print('lmdeploy: OK')
+except Exception as e:
+    print(f'lmdeploy: FAILED ({e}) — will use standard mode fallback')
+try:
+    from faster_qwen3_tts import FasterQwen3TTS; print('faster-qwen3-tts: OK')
+except Exception as e:
+    print(f'faster-qwen3-tts: FAILED ({e}) — will use standard mode fallback')
+try:
+    import vllm; print('vllm: OK')
+except Exception as e:
+    print(f'vllm: FAILED ({e}) — will use standard ASR fallback')
+"
 ```
+
+> **Note on version conflicts**: `lmdeploy 0.12.1` pins `torch<=2.8.0` but typically works fine with `torch 2.10.0` at runtime — the pin is conservative. If it fails, demo3 auto-falls back to standard VieNeu-TTS mode (no code changes needed).
 
 ### Minimal install (without optimized packages)
 
@@ -139,7 +171,7 @@ scp -P <PORT> finetune/finetune_results/merged_model.tar.gz root@<HOST>:/workspa
 cd /workspace/VieNeu-TTS-repo
 
 # Option A: Extract pre-built merged model
-tar -xzf merged_model.tar.gz && rm merged_model.tar.gz
+tar -xzf merged_model_vieneu05B.tar.gz && rm merged_model_vieneu05B.tar.gz
 
 # Option B: Re-merge with bfloat16 precision
 python finetune/merge_lora.py \
@@ -333,10 +365,11 @@ vieneu_tts = Vieneu(
 | `GEMINI_API_KEY` not found | Run `export GEMINI_API_KEY="your-key"` before starting |
 | Microphone not working | Browser requires HTTPS or localhost. Use Cloudflare Tunnel |
 | All badges show red/standard | Optimized packages not installed. Follow Part 1 full install |
-| `lmdeploy` import error | `pip install lmdeploy` — requires Linux + CUDA 12.8 |
+| `lmdeploy` import error | `pip install lmdeploy --no-deps && pip install addict fire mmengine-lite shortuuid termcolor yapf` |
+| torch version conflict after lmdeploy | `pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128` (reinstall LAST) |
 | `faster_qwen3_tts` import error | `pip install faster-qwen3-tts` |
 | `vllm` import error | `pip install vllm --pre "vllm[audio]"` — requires Linux |
-| "no kernel image available" | Wrong CUDA version. Reinstall: `pip install torch --index-url https://download.pytorch.org/whl/cu128` |
+| "no kernel image available" | LMDeploy 0.12.1 does NOT support Blackwell (SM 100) GPUs. demo3_server.py auto-detects this and skips LMDeploy, falling back to standard mode. No action needed. |
 | CUDA OOM | Reduce `memory_util` in Vieneu() calls, or reduce `gpu_memory_utilization` for ASR |
 | FlashAttention install fails | Skip it — demo3 auto-falls back to SDPA (built into PyTorch) |
 | Slow first inference | Normal — models warm up on first call (CUDA graphs, torch.compile). 2nd+ calls are fast |
@@ -356,15 +389,18 @@ tar -xzf merged_model.tar.gz && rm merged_model.tar.gz
 
 # === FULL INSTALL (optimized) ===
 pip install -q fastapi uvicorn websockets python-multipart
-pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu128
 pip install -U qwen-asr google-genai
 pip install -q transformers==4.57.6 peft librosa soundfile tqdm sea-g2p
 pip install -q git+https://github.com/Neuphonic/NeuCodec.git
-pip install lmdeploy                              # VieNeu-TTS fast mode
 pip install faster-qwen3-tts                      # Qwen3-TTS CUDA graphs
-pip install vllm --pre "vllm[audio]"              # ASR vLLM backend
-pip install flash-attn==2.7.4.post1               # FlashAttention 2 for Blackwell
 pip install -q numpy scipy
+pip install vllm --pre --no-deps                  # ASR vLLM (--no-deps!)
+pip install "vllm[audio]" --no-deps
+pip install lmdeploy --no-deps                    # VieNeu-TTS fast mode (--no-deps!)
+pip install addict fire mmengine-lite shortuuid termcolor yapf
+# Install torch BEFORE flash-attn (flash-attn needs torch to build)
+pip install torch==2.10.0 torchaudio==2.10.0 torchvision==0.25.0 --index-url https://download.pytorch.org/whl/cu128
+# pip install flash-attn --no-build-isolation      # optional, needs 16-32GB RAM to build
 
 # === SET API KEY ===
 export GEMINI_API_KEY="your-key"

@@ -21,3 +21,6 @@ finetune/output/
 
 # Merged Models
 merged_models_cache/
+
+# finetune datasets
+finetune/dataset/raw_audio.tar.gz
