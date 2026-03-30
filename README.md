@@ -7,7 +7,7 @@
 [![Hugging Face 0.5B](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-0.5B-yellow)](https://huggingface.co/pnnbao-ump/VieNeu-TTS)
 [![Hugging Face 0.3B](https://img.shields.io/badge/%F0%9F%A4%97%20Hugging%20Face-0.3B-orange)](https://huggingface.co/pnnbao-ump/VieNeu-TTS-0.3B)
 
-<img width="899" height="615" alt="VieNeu-TTS UI" src="https://github.com/user-attachments/assets/7eb9b816-6ab7-4049-866f-f85e36cb9c6f" />
+<img width="1087" height="710" alt="image" src="https://github.com/user-attachments/assets/5534b5db-f30b-4d27-8a35-80f1cf6e5d4d" />
 
 **VieNeu-TTS** is an advanced on-device Vietnamese Text-to-Speech (TTS) model with **instant voice cloning**.
 
@@ -51,25 +51,7 @@ VieNeu-TTS delivers production-ready speech synthesis fully offline.
 
 ## 🦜 1. Installation & Web UI <a name="installation"></a>
 
-> **Intel Arc GPU installation (Optional):** Using PyTorch 2.11 with XPU support. [For Intel arc gpu user, read the Intel Arc GPU section below](#intel-arc). Tested on Arc B580 and A770 on window.
-> Recommend setting: Intel arc have high memory bandwidth so keep the batch size as high as possible and minimize the number of character per chunk.
-
-> ⚡ **Quick Start**  
-> ℹ️ This is the fastest way to get started.  
-> For **streaming inference, SDK integration, Docker deployment, and advanced setups**, see the sections below.
-> ```bash
-> git clone https://github.com/pnnbao97/VieNeu-TTS.git
-> cd VieNeu-TTS
-> uv sync
-> uv run vieneu-web
-> ```
-> Open `http://127.0.0.1:7860` and start generating speech.
-
-
-### System Requirements
-- **NVIDIA GPU (Optional):** For maximum speed via LMDeploy or GGUF GPU acceleration.
-  - Requires **NVIDIA Driver >= 570.65** (CUDA 12.8+) or higher.
-  - For **LMDeploy**, it is recommended to have the [NVIDIA GPU Computing Toolkit](https://developer.nvidia.com/cuda-downloads) installed.
+> *For Intel arc gpu user, [read the Intel Arc GPU section below](#intel-arc).*
 
 ### Installation Steps
 1. **Clone the Repo:**
