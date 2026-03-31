@@ -21,6 +21,8 @@
 - **AI Identification**: Built-in audio watermarking for responsible AI content creation.
 - **Production-Ready**: High-quality 24 kHz waveform generation, fully offline.
 
+https://github.com/user-attachments/assets/ab0914ba-5778-415a-97ad-82556289e6ad
+
 ---
 
 ## 🦜 1. Installation & Web UI <a name="installation"></a>
