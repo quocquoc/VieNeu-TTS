@@ -1,10 +1,8 @@
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional, Union, List, Dict, Any, Generator
+from typing import Optional, Union, List, Dict, Any
 import json
-import torch
 import numpy as np
-import gc
 import logging
 from huggingface_hub import hf_hub_download
 from sea_g2p import Normalizer
@@ -150,7 +148,7 @@ class BaseVieneuTTS(ABC):
             voice_name: Name of voice. If None, uses default_voice.
 
         Returns:
-            dict: { 'codes': torch.Tensor, 'text': str }
+            dict: { 'codes': Union[np.ndarray, 'torch.Tensor'], 'text': str }
         """
         if voice_name is None:
             voice_name = self._default_voice
@@ -165,8 +163,14 @@ class BaseVieneuTTS(ABC):
 
         voice_data = self._preset_voices[voice_name]
         codes = voice_data["codes"]
+        
+        # Only convert to torch if explicitly requested or if we're not in turbo mode
         if isinstance(codes, list):
-            codes = torch.tensor(codes, dtype=torch.long)
+            try:
+                import torch
+                codes = torch.tensor(codes, dtype=torch.long)
+            except ImportError:
+                codes = np.array(codes, dtype=np.int64)
 
         return {"codes": codes, "text": voice_data["text"]}
 
@@ -184,7 +188,7 @@ class BaseVieneuTTS(ABC):
         import soundfile as sf
         sf.write(str(output_path), audio, self.sample_rate)
 
-    def encode_reference(self, ref_audio_path: Union[str, Path]) -> torch.Tensor:
+    def encode_reference(self, ref_audio_path: Union[str, Path]) -> Union[np.ndarray, 'torch.Tensor']:
         """
         Encode reference audio to codes.
 
@@ -192,19 +196,26 @@ class BaseVieneuTTS(ABC):
             ref_audio_path: Path to the reference audio file.
 
         Returns:
-            torch.Tensor: Encoded codes.
+            Union[np.ndarray, torch.Tensor]: Encoded codes.
         """
         import librosa
         wav, _ = librosa.load(ref_audio_path, sr=16000, mono=True)
-        wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)  # [1, 1, T]
+        
+        # If we have an ONNX encoder or specialized turbo encoder, handle it here
+        # For now, default backends still use torch
+        try:
+            import torch
+            wav_tensor = torch.from_numpy(wav).float().unsqueeze(0).unsqueeze(0)  # [1, 1, T]
 
-        # Ensure device and dtype compatibility
-        if hasattr(self.codec, "device"):
-            wav_tensor = wav_tensor.to(self.codec.device)
+            # Ensure device and dtype compatibility
+            if hasattr(self.codec, "device"):
+                wav_tensor = wav_tensor.to(self.codec.device)
 
-        with torch.no_grad():
-            ref_codes = self.codec.encode_code(audio_or_path=wav_tensor).squeeze(0).squeeze(0)
-        return ref_codes
+            with torch.no_grad():
+                ref_codes = self.codec.encode_code(audio_or_path=wav_tensor).squeeze(0).squeeze(0)
+            return ref_codes
+        except ImportError:
+            raise ImportError("Torch is required for encode_reference in the current backend. Please install torch or use a backend that supports standalone encoding.")
 
     def _decode(self, codes_str: str) -> np.ndarray:
         """
@@ -228,16 +239,20 @@ class BaseVieneuTTS(ABC):
             recon = self.codec.decode_code(codes)
         # Torch decode
         else:
-            with torch.no_grad():
-                codes = torch.tensor(speech_ids, dtype=torch.long)[None, None, :]
-                if hasattr(self.codec, "device"):
-                    codes = codes.to(self.codec.device)
+            try:
+                import torch
+                with torch.no_grad():
+                    codes = torch.tensor(speech_ids, dtype=torch.long)[None, None, :]
+                    if hasattr(self.codec, "device"):
+                        codes = codes.to(self.codec.device)
 
-                recon = self.codec.decode_code(codes)
-                if hasattr(recon, "cpu"):
-                    recon = recon.cpu()
-                if hasattr(recon, "numpy"):
-                    recon = recon.numpy()
+                    recon = self.codec.decode_code(codes)
+                    if hasattr(recon, "cpu"):
+                        recon = recon.cpu()
+                    if hasattr(recon, "numpy"):
+                        recon = recon.numpy()
+            except ImportError:
+                raise ImportError("Torch is required for the current codec backend. Please install torch or use an ONNX-based codec.")
 
 
         return recon[0, 0, :]
@@ -246,9 +261,9 @@ class BaseVieneuTTS(ABC):
         self,
         voice: Optional[Dict[str, Any]] = None,
         ref_audio: Optional[Union[str, Path]] = None,
-        ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None,
+        ref_codes: Optional[Union[np.ndarray, 'torch.Tensor']] = None,
         ref_text: Optional[str] = None
-    ) -> tuple[Union[np.ndarray, torch.Tensor], str]:
+    ) -> tuple[Union[np.ndarray, 'torch.Tensor'], str]:
         """Resolve reference voice codes and text."""
         if voice is not None:
             ref_codes = voice.get('codes', ref_codes)
@@ -277,7 +292,7 @@ class BaseVieneuTTS(ABC):
 
     def _format_prompt(
         self,
-        ref_codes: Union[List[int], torch.Tensor, np.ndarray],
+        ref_codes: Union[List[int], 'torch.Tensor', np.ndarray],
         ref_text: str,
         input_text: str,
         ref_phonemes: Optional[str] = None,
@@ -288,10 +303,18 @@ class BaseVieneuTTS(ABC):
         Common implementation for LMDeploy (Fast) and Remote backends.
         Standard backend uses a specialized chat template via tokenizer.
         """
-        if isinstance(ref_codes, (torch.Tensor, np.ndarray)):
-            ref_codes_list = ref_codes.flatten().tolist()
+        if isinstance(ref_codes, (np.ndarray, list)):
+            ref_codes_list = np.array(ref_codes).flatten().tolist()
         else:
-            ref_codes_list = ref_codes
+            # Assume it's a torch tensor if torch is installed
+            try:
+                import torch
+                if isinstance(ref_codes, torch.Tensor):
+                    ref_codes_list = ref_codes.flatten().tolist()
+                else:
+                    ref_codes_list = ref_codes
+            except ImportError:
+                ref_codes_list = ref_codes
 
         # Import inside method to avoid potential circular dependencies between
         # base TTS and phonemization utilities.

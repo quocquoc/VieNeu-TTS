@@ -2,17 +2,16 @@ import gradio as gr
 print("⏳ Đang khởi động VieNeu-TTS... Vui lòng chờ...")
 import soundfile as sf
 import tempfile
-import torch
-from vieneu import VieNeuTTS, FastVieNeuTTS
+from vieneu import Vieneu
 import os
 import sys
 import time
 import numpy as np
-from typing import Generator, Optional, Tuple
 import queue
 import threading
 import yaml
-from vieneu_utils.core_utils import split_text_into_chunks, join_audio_chunks, env_bool
+from vieneu_utils.core_utils import split_text_into_chunks, join_audio_chunks, env_bool, split_into_chunks_v2, get_silence_duration_v2
+from vieneu_utils.phonemize_text import phonemize_with_dict
 from sea_g2p import Normalizer
 from functools import lru_cache
 import gc
@@ -27,6 +26,49 @@ except Exception as e:
 
 BACKBONE_CONFIGS = _config.get("backbone_configs", {})
 CODEC_CONFIGS = _config.get("codec_configs", {})
+
+# Refilter and Simplify Configs per requirements
+HAS_GPU = False
+try:
+    import torch
+    HAS_GPU = torch.cuda.is_available() or (sys.platform == "darwin" and torch.backends.mps.is_available())
+except ImportError:
+    pass
+
+filtered_backbones = {}
+if HAS_GPU:
+    filtered_backbones["VieNeu-TTS (GPU)"] = {
+        "repo": "pnnbao-ump/VieNeu-TTS",
+        "supports_streaming": False,
+        "description": "⭐ Chất lượng cao nhất, yêu cầu GPU/MPS"
+    }
+    filtered_backbones["VieNeu-TTS-0.3B (GPU)"] = {
+        "repo": "pnnbao-ump/VieNeu-TTS-0.3B",
+        "supports_streaming": False,
+        "description": "⚡ Bản 0.3B tối ưu cho GPU, rất nhanh và chính xác"
+    }
+
+filtered_backbones["VieNeu-TTS-v2-Turbo (CPU)"] = {
+    "repo": "pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF",
+    "supports_streaming": True,
+    "description": "🚀 Turbo v2: Siêu nhanh, tối ưu tuyệt đối cho CPU & Thiết bị yếu"
+}
+
+BACKBONE_CONFIGS = filtered_backbones
+
+filtered_codecs = {
+    "NeuCodec (Distill)": {
+        "repo": "neuphonic/distill-neucodec",
+        "description": "Codec mặc định cho model GPU",
+        "use_preencoded": False
+    },
+    "VieNeu-Codec": {
+        "repo": "pnnbao-ump/VieNeu-Codec",
+        "description": "Codec tối ưu cho Turbo v2 (ONNX)",
+        "use_preencoded": False
+    }
+}
+CODEC_CONFIGS = filtered_codecs
 
 _text_settings = _config.get("text_settings", {})
 MAX_CHARS_PER_CHUNK = _text_settings.get("max_chars_per_chunk", 256)
@@ -52,15 +94,17 @@ _ref_text_cache = {}
 def get_available_devices() -> list[str]:
     """Get list of available devices for current platform."""
     devices = ["Auto", "CPU"]
-
-    if sys.platform == "darwin":
-        # macOS - check MPS
-        if torch.backends.mps.is_available():
-            devices.append("MPS")
-    else:
-        # Windows/Linux - check CUDA
-        if torch.cuda.is_available():
-            devices.append("CUDA")
+    
+    try:
+        import torch
+        if sys.platform == "darwin":
+            if torch.backends.mps.is_available():
+                devices.append("MPS")
+        else:
+            if torch.cuda.is_available():
+                devices.append("CUDA")
+    except ImportError:
+        pass
 
     return devices
 
@@ -73,11 +117,22 @@ def get_model_status_message() -> str:
     backbone_config = BACKBONE_CONFIGS.get(current_backbone, {})
     codec_config = CODEC_CONFIGS.get(current_codec, {})
     
-    backend_name = "🚀 LMDeploy (Optimized)" if using_lmdeploy else "📦 Standard"
+    if "v2-Turbo" in (current_backbone or ""):
+        backend_name = "⚡ Turbo (v2)"
+    elif using_lmdeploy:
+        backend_name = "🚀 LMDeploy (Optimized)"
+    else:
+        backend_name = "📦 Standard"
     
     # We don't track the exact device strings perfectly in global state, so we estimate
-    device_info = "GPU" if using_lmdeploy else "Auto"
-    codec_device = "CPU" if "ONNX" in (current_codec or "") else ("GPU/MPS" if torch.cuda.is_available() or torch.backends.mps.is_available() else "CPU")
+    device_info = "GPU" if (using_lmdeploy or "CUDA" in (current_backbone or "")) else "Auto"
+    
+    if "v2-Turbo" in (current_backbone or ""):
+        codec_device = "CPU/GPU"
+    elif "ONNX" in (current_codec or ""):
+        codec_device = "CPU"
+    else:
+        codec_device = "GPU/MPS" if (torch.cuda.is_available() if 'torch' in sys.modules else False) or (torch.backends.mps.is_available() if 'torch' in sys.modules else False) else "CPU"
     
     preencoded_note = "\n⚠️ Codec ONNX không hỗ trợ chức năng clone giọng nói." if codec_config.get('use_preencoded') else ""
     
@@ -95,7 +150,7 @@ def get_model_status_message() -> str:
     return (
         f"✅ Model đã tải thành công!\n\n"
         f"🔧 Backend: {backend_name}\n"
-        f"🦜 Backbone: {current_backbone}\n"
+        f" Parrot: {current_backbone}\n"
         f"🎵 Codec: {current_codec}{preencoded_note}{opt_info}"
     )
 
@@ -115,17 +170,20 @@ def should_use_lmdeploy(backbone_choice: str, device_choice: str) -> bool:
     if sys.platform == "darwin":
         return False
 
-    if "gguf" in backbone_choice.lower():
+    if "gguf" in backbone_choice.lower() or "v2-turbo" in backbone_choice.lower():
         return False
-
-    if device_choice == "Auto":
-        has_gpu = torch.cuda.is_available()
-    elif device_choice == "CUDA":
-        has_gpu = torch.cuda.is_available()
-    else:
-        has_gpu = False
-
-    return has_gpu
+    
+    try:
+        import torch
+        if device_choice == "Auto":
+            has_gpu = torch.cuda.is_available()
+        elif device_choice == "CUDA":
+            has_gpu = torch.cuda.is_available()
+        else:
+            has_gpu = False
+        return has_gpu
+    except ImportError:
+        return False
 
 @lru_cache(maxsize=32)
 def get_ref_text_cached(text_path: str) -> str:
@@ -135,11 +193,13 @@ def get_ref_text_cached(text_path: str) -> str:
 
 def cleanup_gpu_memory():
     """Aggressively cleanup GPU memory"""
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        torch.cuda.synchronize()
-    elif torch.backends.mps.is_available():
-        torch.mps.empty_cache()
+    if 'torch' in sys.modules:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.synchronize()
+        elif torch.backends.mps.is_available():
+            torch.mps.empty_cache()
     gc.collect()
 
 def load_model(backbone_choice: str, codec_choice: str, device_choice: str, 
@@ -212,8 +272,8 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
         
         # Override LMDeploy if custom
         if custom_loading:
-             if "gguf" in backbone_config['repo'].lower():
-                 # GGUF must use Standard backend (llama-cpp)
+             if "gguf" in backbone_config['repo'].lower() or "v2-turbo" in backbone_config['repo'].lower():
+                 # GGUF must use Standard/Turbo backend
                  use_lmdeploy = False
              elif is_merged_lora:
                  # LoRA can use LMDeploy if we merge first (checked logic below) or Standard
@@ -222,7 +282,10 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
                  # Full custom model (e.g. finetune)
                  use_lmdeploy = force_lmdeploy and should_use_lmdeploy("VieNeu-TTS (GPU)", device_choice) # Assume GPU compatible?
         else:
-             use_lmdeploy = force_lmdeploy and should_use_lmdeploy(backbone_choice, device_choice)
+             if "v2-Turbo" in backbone_choice:
+                 use_lmdeploy = False # v2 Turbo uses dedicated backend
+             else:
+                 use_lmdeploy = force_lmdeploy and should_use_lmdeploy(backbone_choice, device_choice)
         
         if use_lmdeploy:
             lmdeploy_error_reason = None
@@ -233,7 +296,11 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
             if "ONNX" in codec_choice:
                 codec_device = "cpu"
             else:
-                codec_device = "cuda" if torch.cuda.is_available() else "cpu"
+                try:
+                    import torch
+                    codec_device = "cuda" if torch.cuda.is_available() else "cpu"
+                except ImportError:
+                    codec_device = "cpu"
             
             # Special handling for Custom LoRA + LMDeploy -> Merge & Save
             target_backbone_repo = backbone_config["repo"]
@@ -321,6 +388,7 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
             print(f"   Triton: Enabled")
             
             try:
+                from vieneu.fast import FastVieNeuTTS
                 tts = FastVieNeuTTS(
                     backbone_repo=target_backbone_repo,
                     backbone_device=backbone_device,
@@ -363,26 +431,39 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
             print(f"📦 Using original backend")
 
             if device_choice == "Auto":
-                if "gguf" in backbone_config['repo'].lower():
+                if "gguf" in backbone_config['repo'].lower() or "v2-turbo" in backbone_config['repo'].lower():
                     # GGUF: uses Metal on Mac, CUDA on Windows/Linux
                     if sys.platform == "darwin":
                         backbone_device = "gpu"  # llama-cpp-python uses Metal
                     else:
-                        backbone_device = "gpu" if torch.cuda.is_available() else "cpu"
+                        try:
+                            import torch
+                            backbone_device = "gpu" if torch.cuda.is_available() else "cpu"
+                        except ImportError:
+                            backbone_device = "cpu"
                 else:
                     # PyTorch model
-                    if sys.platform == "darwin":
-                        backbone_device = "mps" if torch.backends.mps.is_available() else "cpu"
-                    else:
-                        backbone_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    try:
+                        import torch
+                        if sys.platform == "darwin":
+                            backbone_device = "mps" if torch.backends.mps.is_available() else "cpu"
+                        else:
+                            backbone_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    except ImportError:
+                        backbone_device = "cpu"
 
                 # Codec device
                 if "ONNX" in codec_choice:
                     codec_device = "cpu"
-                elif sys.platform == "darwin":
-                    codec_device = "mps" if torch.backends.mps.is_available() else "cpu"
                 else:
-                    codec_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    try:
+                        import torch
+                        if sys.platform == "darwin":
+                            codec_device = "mps" if torch.backends.mps.is_available() else "cpu"
+                        else:
+                            codec_device = "cuda" if torch.cuda.is_available() else "cpu"
+                    except ImportError:
+                        codec_device = "cpu"
 
             elif device_choice == "MPS":
                 backbone_device = "mps"
@@ -395,20 +476,32 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
                 if "ONNX" in codec_choice:
                     codec_device = "cpu"
 
-            if "gguf" in backbone_config['repo'].lower() and backbone_device == "cuda":
+            if ("gguf" in backbone_config['repo'].lower() or "v2-turbo" in backbone_config['repo'].lower()) and backbone_device == "cuda":
                 backbone_device = "gpu"
             
             print(f"📦 Loading model...")
             print(f"   Backbone: {backbone_config['repo']} on {backbone_device}")
             print(f"   Codec: {codec_config['repo']} on {codec_device}")
             
-            tts = VieNeuTTS(
-                backbone_repo=backbone_config["repo"],
-                backbone_device=backbone_device,
-                codec_repo=codec_config["repo"],
-                codec_device=codec_device,
-                hf_token=custom_hf_token
-            )
+            if "v2-Turbo" in backbone_choice:
+                # VieNeu v2 Turbo uses the dedicated backend
+                print("   ⚡ Mode: Turbo")
+                tts = Vieneu(
+                    mode="turbo",
+                    backbone_repo=backbone_config["repo"],
+                    decoder_repo=codec_config["repo"],
+                    device=backbone_device,
+                    hf_token=custom_hf_token
+                )
+            else:
+                from vieneu.standard import VieNeuTTS
+                tts = VieNeuTTS(
+                    backbone_repo=backbone_config["repo"],
+                    backbone_device=backbone_device,
+                    codec_repo=codec_config["repo"],
+                    codec_device=codec_device,
+                    hf_token=custom_hf_token
+                )
 
             # Perform LoRA Merge if needed (ONLY for Standard Backend)
             # For LMDeploy, we handled it above by saving to disk
@@ -614,8 +707,10 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
             raise ValueError(f"Unknown mode: {mode_tab}")
 
         # Ensure numpy for inference
-        if isinstance(ref_codes, torch.Tensor):
-            ref_codes = ref_codes.cpu().numpy()
+        if 'torch' in sys.modules:
+            import torch
+            if isinstance(ref_codes, torch.Tensor):
+                ref_codes = ref_codes.cpu().numpy()
 
     except Exception as e:
         yield None, f"❌ Lỗi xử lý Reference Audio: {str(e)}"
@@ -626,7 +721,15 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
         backend_name = "LMDeploy" if using_lmdeploy else "Standard"
 
         normalized_text = _text_normalizer.normalize(raw_text)
-        text_chunks = split_text_into_chunks(normalized_text, max_chars=max_chars_chunk)
+        is_v2_turbo = "v2-Turbo" in (current_backbone or "")
+        
+        if is_v2_turbo:
+            # Phoneme-based splitting for accurate progress reporting
+            phonemes = phonemize_with_dict(normalized_text, skip_normalize=True)
+            text_chunks = split_into_chunks_v2(phonemes, max_chunk_size=max_chars_chunk)
+        else:
+            text_chunks = split_text_into_chunks(normalized_text, max_chars=max_chars_chunk)
+            
         total_chunks = len(text_chunks)
 
         batch_info = " (Batch Mode)" if use_batch and using_lmdeploy and total_chunks > 1 else ""
@@ -644,11 +747,32 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
         start_time = time.time()
         
         try:
-            # Use batch processing if enabled and using LMDeploy
-            if use_batch and using_lmdeploy and hasattr(tts, 'infer_batch') and total_chunks > 1:
-                # Show how many mini-batches will be processed
+            if is_v2_turbo:
+                # Sequential processing with progress updates
+                total_chunks = len(text_chunks)
+                for i, chunk in enumerate(text_chunks):
+                    yield None, f"⚡ Turbo v2: Đang xử lý đoạn {i+1}/{total_chunks}..."
+                    
+                    chunk_wav = tts.infer(
+                        chunk, 
+                        ref_codes=ref_codes, 
+                        temperature=temperature,
+                        max_chars=max_chars_chunk,
+                        skip_normalize=True,
+                        skip_phonemize=True
+                    )
+                    
+                    if chunk_wav is not None and len(chunk_wav) > 0:
+                        all_wavs.append(chunk_wav)
+                        # Add silence between Gradio-level chunks for Turbo
+                        if i < total_chunks - 1:
+                            sil_dur = get_silence_duration_v2(chunk)
+                            sil_wav = np.zeros(int(sr * sil_dur), dtype=np.float32)
+                            all_wavs.append(sil_wav)
+            
+            # Use batch processing if enabled and using LMDeploy (for v1)
+            elif use_batch and using_lmdeploy and hasattr(tts, 'infer_batch') and total_chunks > 1:
                 num_batches = (total_chunks + max_batch_size_run - 1) // max_batch_size_run
-                
                 yield None, f"⚡ Xử lý {num_batches} mini-batch(es) (max {max_batch_size_run} đoạn/batch)..."
                 
                 chunk_wavs = tts.infer_batch(
@@ -659,16 +783,14 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
                     temperature=temperature,
                     skip_normalize=True
                 )
-                
                 for chunk_wav in chunk_wavs:
                     if chunk_wav is not None and len(chunk_wav) > 0:
                         all_wavs.append(chunk_wav)
 
             else:
-                # Sequential processing
+                # Sequential processing (PyTorch or GGUF v1)
                 for i, chunk in enumerate(text_chunks):
                     yield None, f"⏳ Đang xử lý đoạn {i+1}/{total_chunks}..."
-                    
                     chunk_wav = tts.infer(
                         chunk, 
                         ref_codes=ref_codes, 
@@ -677,7 +799,6 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
                         max_chars=max_chars_chunk,
                         skip_normalize=True
                     )
-                    
                     if chunk_wav is not None and len(chunk_wav) > 0:
                         all_wavs.append(chunk_wav)
             
@@ -689,7 +810,8 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
             
             # Use utility function for joining with silence/crossfade
             # Default silence=0.15s to match SDK
-            final_wav = join_audio_chunks(all_wavs, sr=sr, silence_p=0.15)
+            silence_p = 0.15 if not is_v2_turbo else 0.0 # Turbo adds silence internally
+            final_wav = join_audio_chunks(all_wavs, sr=sr, silence_p=silence_p)
             
             with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp:
                 sf.write(tmp.name, final_wav, sr)
@@ -708,17 +830,20 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
             
             cleanup_gpu_memory()
             
-        except torch.cuda.OutOfMemoryError as e:
-            cleanup_gpu_memory()
-            yield None, (
-                f"❌ GPU hết VRAM! Hãy thử:\n"
-                f"• Giảm Max Batch Size (hiện tại: {tts.max_batch_size if hasattr(tts, 'max_batch_size') else 'N/A'})\n"
-                f"• Giảm độ dài văn bản\n\n"
-                f"Chi tiết: {str(e)}"
-            )
-            return
-            
         except Exception as e:
+            # Check for CUDA OOM specifically if torch is loaded
+            if 'torch' in sys.modules:
+                import torch
+                if isinstance(e, torch.cuda.OutOfMemoryError):
+                    cleanup_gpu_memory()
+                    yield None, (
+                        f"❌ GPU hết VRAM! Hãy thử:\n"
+                        f"• Giảm Max Batch Size (hiện tại: {tts.max_batch_size if hasattr(tts, 'max_batch_size') else 'N/A'})\n"
+                        f"• Giảm độ dài văn bản\n\n"
+                        f"Chi tiết: {str(e)}"
+                    )
+                    return
+            
             import traceback
             traceback.print_exc()
             cleanup_gpu_memory()
@@ -737,7 +862,12 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
         error_msg = ""
         
         normalized_text = _text_normalizer.normalize(raw_text)
-        text_chunks = split_text_into_chunks(normalized_text, max_chars=max_chars_chunk)
+        is_v2_turbo = "v2-Turbo" in (current_backbone or "")
+        if is_v2_turbo:
+            phonemes = phonemize_with_dict(normalized_text, skip_normalize=True)
+            text_chunks = split_into_chunks_v2(phonemes, max_chunk_size=max_chars_chunk)
+        else:
+            text_chunks = split_text_into_chunks(normalized_text, max_chars=max_chars_chunk)
         
         def producer_thread():
             nonlocal error_msg
@@ -745,14 +875,24 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
                 previous_tail = None
                 
                 for i, chunk_text in enumerate(text_chunks):
-                    stream_gen = tts.infer_stream(
-                        chunk_text, 
-                        ref_codes=ref_codes, 
-                        ref_text=ref_text_raw,
-                        temperature=temperature,
-                        max_chars=max_chars_chunk,
-                        skip_normalize=True
-                    )
+                    if is_v2_turbo:
+                        stream_gen = tts.infer_stream(
+                            chunk_text, 
+                            ref_codes=ref_codes, 
+                            temperature=temperature,
+                            max_chars=max_chars_chunk,
+                            skip_normalize=True,
+                            skip_phonemize=True
+                        )
+                    else:
+                        stream_gen = tts.infer_stream(
+                            chunk_text, 
+                            ref_codes=ref_codes, 
+                            ref_text=ref_text_raw,
+                            temperature=temperature,
+                            max_chars=max_chars_chunk,
+                            skip_normalize=True
+                        )
                     
                     for part_idx, audio_part in enumerate(stream_gen):
                         if audio_part is None or len(audio_part) == 0:
@@ -785,6 +925,12 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
                         
                         if len(output_chunk) > 0:
                             audio_queue.put((sr, output_chunk))
+                            
+                    # Add silence between chunks for Turbo v2
+                    if is_v2_turbo and i < len(text_chunks) - 1:
+                        sil_dur = get_silence_duration_v2(chunk_text)
+                        sil_wav = np.zeros(int(sr * sil_dur), dtype=np.float32)
+                        audio_queue.put((sr, sil_wav))
                 
                 if previous_tail is not None and len(previous_tail) > 0:
                     audio_queue.put((sr, previous_tail))
@@ -1002,6 +1148,8 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             <a href="https://huggingface.co/pnnbao-ump/VieNeu-TTS" target="_blank" class="model-card-link">VieNeu-TTS</a>
             <span>•</span>
             <a href="https://huggingface.co/pnnbao-ump/VieNeu-TTS-0.3B" target="_blank" class="model-card-link">VieNeu-TTS-0.3B</a>
+            <span>•</span>
+            <a href="https://huggingface.co/pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF" target="_blank" class="model-card-link">VieNeu-TTS-v2 (Turbo)</a>
         </div>
         <div class="model-card-item">
             <strong>Repository:</strong>
@@ -1024,11 +1172,16 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             with gr.Row():
                 backbone_select = gr.Dropdown(
                     list(BACKBONE_CONFIGS.keys()) + ["Custom Model"], 
-                    value="VieNeu-TTS (GPU)", 
+                    value="VieNeu-TTS-v2-Turbo (CPU)" if "VieNeu-TTS-v2-Turbo (CPU)" in BACKBONE_CONFIGS else list(BACKBONE_CONFIGS.keys())[0], 
                     label="🦜 Backbone"
                 )
-                codec_select = gr.Dropdown(list(CODEC_CONFIGS.keys()), value="NeuCodec (Distill)", label="🎵 Codec")
-                device_choice = gr.Radio(get_available_devices(), value="Auto", label="🖥️ Device")
+                codec_select = gr.Dropdown(
+                    list(CODEC_CONFIGS.keys()), 
+                    value="VieNeu-Codec" if "VieNeu-Codec" in CODEC_CONFIGS else list(CODEC_CONFIGS.keys())[0], 
+                    label="🎵 Codec",
+                    interactive=False
+                )
+                device_choice = gr.Radio(["CPU"], value="CPU", label="🖥️ Device")
             
             with gr.Row(visible=False) as custom_model_group:
                 custom_backbone_model_id = gr.Textbox(
@@ -1044,12 +1197,13 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
                     info="Token để truy cập repo private",
                     scale=1
                 )
+                base_model_choices = [k for k in BACKBONE_CONFIGS.keys() if "turbo" not in k.lower() and k != "Custom Model"]
                 custom_backbone_base_model = gr.Dropdown(
-                    [k for k in BACKBONE_CONFIGS.keys() if "gguf" not in k.lower()],
+                    base_model_choices,
                     label="🔗 Base Model (cho LoRA)",
-                    value="VieNeu-TTS-0.3B (GPU)",
+                    value=base_model_choices[0] if base_model_choices else None,
                     visible=False,
-                    info="Model gốc để merge với LoRA",
+                    info="Model gốc để merge với LoRA (GPU Only)",
                     scale=1
                 )
             
@@ -1072,16 +1226,21 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
                 </div>
                 <div class="warning-banner-grid">
                     <div class="warning-banner-item">
-                        <strong>🐢 Hệ máy CPU</strong>
+                        <strong>🦜 Tính năng multi-language</strong>
                         <div class="warning-banner-content">
-                            Sử dụng <b>VieNeu-TTS-0.3B-q4-gguf</b> để đạt tốc độ xử lý nhanh nhất. Nếu ưu tiên độ chính xác thì dùng <b>VieNeu-TTS-0.3B-q8-gguf</b>.
+                            Bản <b>VieNeu-TTS-v2</b> (bao gồm cả bản <b>Turbo v2</b>) hỗ trợ đọc <b>song ngữ Anh-Việt</b> mượt mà và tự nhiên nhất nhờ sự hỗ trợ của thư viện <b>sea-g2p</b> và codec <b>VieNeu-Codec</b>.
                         </div>
                     </div>
                     <div class="warning-banner-item">
                         <strong>🐆 Hệ máy GPU</strong>
                         <div class="warning-banner-content">
-                            Chọn <b>VieNeu-TTS-0.3B (GPU)</b> để x2 tốc độ (chính xác ~80% nhưng tốc độ nhanh hơn). Nếu muốn độ chính xác cao nhất, hãy sử dụng <b>VieNeu-TTS</b> gốc.<br><br>
-                            ⚠️ <b>Lưu ý GPU cũ (RTX 10/20, T4):</b> Các GPU này không hỗ trợ bfloat16, nên khi dùng LMDeploy <b>bắt buộc</b> phải chọn <b>VieNeu-TTS-0.3B</b> thay vì bản VieNeu-TTS gốc.
+                            Để có độ chính xác cao nhất và giọng đọc tự nhiên nhất, hãy sử dụng <b>VieNeu-TTS (Mặc định - GPU)</b>. Chọn <b>VieNeu-TTS-0.3B (GPU)</b> để tăng tốc độ lên gấp 2 lần (độ chính xác đạt khoảng 80% so với bản gốc). 
+                        </div>
+                    </div>
+                    <div class="warning-banner-item" style="background: #dcfce7; border-color: #86efac;">
+                        <strong style="color: #15803d;">🚀 Sắp ra mắt: VieNeu-TTS-v2</strong>
+                        <div class="warning-banner-content" style="color: #166534;">
+                            Phiên bản <b>VieNeu-TTS-v2</b> đầy đủ đang được phát triển với khả năng đọc <b>song ngữ Anh-Việt (Code-switching)</b> và <b>Voice Cloning</b> chất lượng cao. Phiên bản <b>Turbo v2</b> (tối ưu cho CPU) đã được ra mắt sớm để người dùng trải nghiệm trước.
                         </div>
                     </div>
                 </div>
@@ -1096,8 +1255,8 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             with gr.Column(scale=3):
                 text_input = gr.Textbox(
                     label=f"Văn bản",
-                    lines=4,
-                    value="Hà Nội, trái tim của Việt Nam, là một thành phố ngàn năm văn hiến với bề dày lịch sử và văn hóa độc đáo. Bước chân trên những con phố cổ kính quanh Hồ Hoàn Kiếm, du khách như được du hành ngược thời gian, chiêm ngưỡng kiến trúc Pháp cổ điển hòa quyện với nét kiến trúc truyền thống Việt Nam. Mỗi con phố trong khu phố cổ mang một tên gọi đặc trưng, phản ánh nghề thủ công truyền thống từng thịnh hành nơi đây như phố Hàng Bạc, Hàng Đào, Hàng Mã. Ẩm thực Hà Nội cũng là một điểm nhấn đặc biệt, từ tô phở nóng hổi buổi sáng, bún chả thơm lừng trưa hè, đến chè Thái ngọt ngào chiều thu. Những món ăn dân dã này đã trở thành biểu tượng của văn hóa ẩm thực Việt, được cả thế giới yêu mến. Người Hà Nội nổi tiếng với tính cách hiền hòa, lịch thiệp nhưng cũng rất cầu toàn trong từng chi tiết nhỏ, từ cách pha trà sen cho đến cách chọn hoa sen tây để thưởng trà.",
+                    lines=8,
+                    value="Trước đây, hệ thống điện chủ yếu sử dụng direct current, nhưng Tesla đã chứng minh rằng alternating current is more efficient for long-distance transmission. Nhờ đó, điện có thể được truyền đi xa hơn với ít tổn thất năng lượng hơn. Đây là một bước tiến cực kỳ quan trọng trong ngành điện.\n\nMột trong những phát minh nổi tiếng của ông là Tesla coil, một thiết bị có thể tạo ra điện áp rất cao và những tia sét nhân tạo. This device is still used today in demonstrations và trong một số ứng dụng nghiên cứu. Khi nhìn thấy những tia điện này, nhiều người cảm thấy vừa ấn tượng vừa hơi đáng sợ.",
                 )
                 
                 with gr.Tabs() as tabs:
@@ -1105,24 +1264,31 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
                         voice_select = gr.Dropdown(choices=[], value=None, label="Giọng mẫu")
                     
                     with gr.TabItem("🦜 Voice Cloning", id="custom_mode") as tab_custom:
-                        custom_audio = gr.Audio(label="Audio giọng mẫu (3-5 giây) (.wav)", type="filepath")
-                        cloning_warning_msg = gr.Markdown(visible=False, elem_id="cloning-warning")
-                        custom_text = gr.Textbox(label="Nội dung audio mẫu - vui lòng gõ đúng nội dung của audio mẫu - kể cả dấu câu vì model rất nhạy cảm với dấu câu (.,?!)")
-                        gr.Examples(
-                            examples=[
-                                [os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "audio_ref", "example.wav"), "Ví dụ 2. Tính trung bình của dãy số."],
-                                [os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "audio_ref", "example_2.wav"), "Trên thực tế, các nghi ngờ đã bắt đầu xuất hiện."],
-                                [os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "audio_ref", "example_3.wav"), "Cậu có nhìn thấy không?"],
-                                [os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "audio_ref", "example_4.wav"), "Tết là dịp mọi người háo hức đón chào một năm mới với nhiều hy vọng và mong ước."]
-                            ],
-                            inputs=[custom_audio, custom_text],
-                            label="Ví dụ mẫu để thử nghiệm clone giọng"
+                        turbo_v2_cloning_notice = gr.Markdown(
+                            "⚠️ **Thông báo:** Bản Turbo không hỗ trợ chức năng Voice Cloning. Vui lòng sử dụng bản **VieNeu-TTS (GPU)** hoặc chờ đến khi phiên bản **VieNeu-TTS-v2** chính thức ra mắt.", 
+                            visible=True,
+                            elem_id="turbo-cloning-notice"
                         )
                         
-                        gr.Markdown("""
-                        **💡 Mẹo nhỏ:** Nếu kết quả Zero-shot Voice Cloning chưa như ý, bạn hãy cân nhắc **Finetune (LoRA)** để đạt chất lượng tốt nhất. 
-                        Hướng dẫn chi tiết có tại file: `finetune/README.md` hoặc xem trên [GitHub](https://github.com/pnnbao97/VieNeu-TTS/tree/main/finetune).
-                        """)              
+                        with gr.Group(visible=False) as cloning_elements_group:
+                            custom_audio = gr.Audio(label="Audio giọng mẫu (3-5 giây) (.wav)", type="filepath")
+                            cloning_warning_msg = gr.Markdown(visible=False, elem_id="cloning-warning")
+                            custom_text = gr.Textbox(label="Nội dung audio mẫu - vui lòng gõ đúng nội dung của audio mẫu - kể cả dấu câu vì model rất nhạy cảm với dấu câu (.,?!)")
+                            gr.Examples(
+                                examples=[
+                                    [os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "audio_ref", "example.wav"), "Ví dụ 2. Tính trung bình của dãy số."],
+                                    [os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "audio_ref", "example_2.wav"), "Trên thực tế, các nghi ngờ đã bắt đầu xuất hiện."],
+                                    [os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "audio_ref", "example_3.wav"), "Cậu có nhìn thấy không?"],
+                                    [os.path.join(os.path.dirname(os.path.dirname(__file__)), "examples", "audio_ref", "example_4.wav"), "Tết là dịp mọi người háo hức đón chào một năm mới với nhiều hy vọng và mong ước."]
+                                ],
+                                inputs=[custom_audio, custom_text],
+                                label="Ví dụ mẫu để thử nghiệm clone giọng"
+                            )
+                            
+                            gr.Markdown("""
+                            **💡 Mẹo nhỏ:** Nếu kết quả Zero-shot Voice Cloning chưa như ý, bạn hãy cân nhắc **Finetune (LoRA)** để đạt chất lượng tốt nhất. 
+                            Hướng dẫn chi tiết có tại file: `finetune/README.md` hoặc xem trên [GitHub](https://github.com/pnnbao97/VieNeu-TTS/tree/main/finetune).
+                            """)
                 
                 generation_mode = gr.Radio(
                     ["Standard (Một lần)"],
@@ -1147,7 +1313,7 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
                 with gr.Accordion("⚙️ Cài đặt nâng cao (Generation)", open=False):
                     with gr.Row():
                         temperature_slider = gr.Slider(
-                            minimum=0.1, maximum=1.5, value=1.0, step=0.1,
+                            minimum=0.1, maximum=1.5, value=0.4, step=0.1,
                             label="🌡️ Temperature", 
                             info="Độ sáng tạo. Cao = đa dạng cảm xúc hơn nhưng dễ lỗi. Thấp = ổn định hơn."
                         )
@@ -1221,20 +1387,70 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
         custom_audio.change(validate_audio_duration, inputs=[custom_audio], outputs=[cloning_warning_msg])
         
         # --- Custom Model Event Handlers ---
+        DEFAULT_TEXT_GPU = "Hà Nội, trái tim của Việt Nam, là một thành phố ngàn năm văn hiến với bề dày lịch sử và văn hóa độc đáo. Bước chân trên những con phố cổ kính quanh Hồ Hoàn Kiếm, du khách như được du hành ngược thời gian, chiêm ngưỡng kiến trúc Pháp cổ điển hòa quyện với nét kiến trúc truyền thống Việt Nam. Mỗi con phố trong khu phố cổ mang một tên gọi đặc trưng, phản ánh nghề thủ công truyền thống từng thịnh hành nơi đây như phố Hàng Bạc, Hàng Đào, Hàng Mã. Ẩm thực Hà Nội cũng là một điểm nhấn đặc biệt, từ tô phở nóng hổi buổi sáng, bún chả thơm lừng trưa hè, đến chè Thái ngọt ngào chiều thu. Những món ăn dân dã này đã trở thành biểu tượng của văn hóa ẩm thực Việt, được cả thế giới yêu mến. Người Hà Nội nổi tiếng với tính cách hiền hòa, lịch thiệp nhưng cũng rất cầu toàn trong từng chi tiết nhỏ, từ cách pha trà sen cho đến cách chọn hoa sen tây để thưởng trà."
+        DEFAULT_TEXT_TURBO = (
+            "Trước đây, hệ thống điện chủ yếu sử dụng direct current, nhưng Tesla đã chứng minh rằng alternating current is more efficient for long-distance transmission. Nhờ đó, điện có thể được truyền đi xa hơn với ít tổn thất năng lượng hơn. Đây là một bước tiến cực kỳ quan trọng trong ngành điện.\n\n"
+            "Một trong những phát minh nổi tiếng của ông là Tesla coil, một thiết bị có thể tạo ra điện áp rất cao và những tia sét nhân tạo. This device is still used today in demonstrations và trong một số ứng dụng nghiên cứu. Khi nhìn thấy những tia điện này, nhiều người cảm thấy vừa ấn tượng vừa hơi đáng sợ."
+        )
+
         def on_backbone_change(choice):
             is_custom = (choice == "Custom Model")
-            return gr.update(visible=is_custom)
+            
+            # Default params per user requirement
+            if is_custom:
+                return (
+                    gr.update(visible=True), 
+                    gr.update(interactive=True), 
+                    gr.update(), 
+                    gr.update(),
+                    gr.update(choices=get_available_devices(), value="Auto"),
+                    gr.update(visible=False), # turbo notice
+                    gr.update(visible=True)   # cloning group
+                )
+            
+            if "Turbo" in choice:
+                codec_update = gr.update(value="VieNeu-Codec", interactive=False)
+                text_update = gr.update(value=DEFAULT_TEXT_TURBO)
+                temp_update = gr.update(value=0.4)
+                device_update = gr.update(choices=["CPU"], value="CPU")
+                turbo_notice_update = gr.update(visible=True)
+                cloning_group_update = gr.update(visible=False)
+            else:
+                codec_update = gr.update(value="NeuCodec (Distill)", interactive=False)
+                text_update = gr.update(value=DEFAULT_TEXT_GPU)
+                temp_update = gr.update(value=0.7)
+                device_update = gr.update(choices=get_available_devices(), value="Auto")
+                turbo_notice_update = gr.update(visible=False)
+                cloning_group_update = gr.update(visible=True)
+                
+            return (
+                gr.update(visible=is_custom), 
+                codec_update, 
+                text_update, 
+                temp_update, 
+                device_update,
+                turbo_notice_update,
+                cloning_group_update
+            )
 
         backbone_select.change(
             on_backbone_change,
             inputs=[backbone_select],
-            outputs=[custom_model_group]
+            outputs=[
+                custom_model_group, 
+                codec_select, 
+                text_input, 
+                temperature_slider, 
+                device_choice,
+                turbo_v2_cloning_notice,
+                cloning_elements_group
+            ]
         )
         
         def on_custom_id_change(model_id):
             # Auto detect LoRA and base model
             if model_id and "lora" in model_id.lower():
-                # Detect base model: if "0.3" in name -> 0.3B, else VieNeu-TTS
+                # Detect base model
                 if "0.3" in model_id:
                     base_model = "VieNeu-TTS-0.3B (GPU)"
                 else:
@@ -1256,6 +1472,19 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             inputs=[custom_backbone_model_id],
             outputs=[custom_backbone_base_model, custom_audio, custom_text]
         )
+
+        # # Add a helpful notice for CPU users
+        # with gr.Row(elem_classes="warning-banner-grid", visible=True):
+        #     gr.Markdown(
+        #         """
+        #         <div class="warning-banner-item">
+        #             <strong>💡 Lưu ý cho người dùng CPU:</strong>
+        #             <div class="warning-banner-content">
+        #                 Với thiết bị không có GPU, hãy chọn bản <b>Turbo v2 (Khuyên dùng cho CPU)</b> để có tốc độ đọc tốt nhất.
+        #             </div>
+        #         </div>
+        #         """
+        #     )
 
         btn_load.click(
             fn=load_model,

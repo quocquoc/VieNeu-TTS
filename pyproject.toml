@@ -12,7 +12,7 @@ required-environments = [
 override-dependencies = [
     "nvidia-nccl-cu12; sys_platform == 'linux'",
 ]
-default-groups = ["web"]
+# default-groups = ["web"]
 
 [[tool.uv.index]]
 name = "pytorch"
@@ -29,14 +29,9 @@ name = "llama-cpp-metal"
 url = "https://abetlen.github.io/llama-cpp-python/whl/metal/"
 explicit = true
 
-[[tool.uv.index]]
-name = "llama-cpp-win-cpu"
-url = "https://pnnbao97.github.io/llama-cpp-python-v0.3.16/cpu/"
-explicit = true
-
 [project]
 name = "vieneu"
-version = "1.2.9"
+version = "2.1.1"
 description = "Advanced on-device Vietnamese TTS with instant voice cloning"
 readme = "README_PYPI.md"
 license = { file = "LICENSE" }
@@ -67,16 +62,15 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    "sea-g2p>=0.6.12",
-    "neucodec>=0.0.4",
-    "librosa>=0.11.0",
-    "onnxruntime>=1.23.2",
-    "datasets>=3.2.0",
-    "torch",
-    "torchaudio",
-    "perth>=0.2.0",
-    "llama-cpp-python==0.3.16",
+    "sea-g2p>=0.7.5",
+    "onnxruntime>=1.20.0",
+    "llama-cpp-python>=0.3.16",
     "requests",
+    "numpy",
+    "soundfile",
+    "PyYAML",
+    "gradio>=5.49.1",
+    "perth>=0.2.0",
 ]
 
 [project.urls]
@@ -89,6 +83,9 @@ dependencies = [
 
 [project.optional-dependencies]
 gpu = [
+    "torch",
+    "torchaudio",
+    "neucodec>=0.0.4",
     "lmdeploy; sys_platform != 'darwin'",
     "triton-windows; sys_platform == 'win32'",
     "triton; sys_platform == 'linux'",
@@ -101,14 +98,18 @@ dev = [
     "pytest",
     "pytest-asyncio",
 ]
-
-web = [
+gpu = [
+    "neucodec>=0.0.4",
+    "torch",
+    "torchaudio",
+    "librosa>=0.11.0",
+    "datasets>=3.2.0",
+    "perth>=0.2.0",
     "lmdeploy; sys_platform != 'darwin'",
     "triton-windows; sys_platform == 'win32'",
     "triton; sys_platform == 'linux'",
     "transformers; sys_platform == 'darwin'",
     "accelerate; sys_platform == 'darwin'",
-    "gradio>=5.49.1",
     "trafilatura>=2.0.0",
 ]
 
@@ -148,7 +149,10 @@ lmdeploy = [
 ]
 
 llama-cpp-python = [
-    { index = "llama-cpp-win-cpu", marker = "sys_platform == 'win32'" },
+    { url = "https://github.com/pnnbao97/VieNeu-TTS/releases/download/wheels-v0.3.16/llama_cpp_python-0.3.16-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
+    { url = "https://github.com/pnnbao97/VieNeu-TTS/releases/download/wheels-v0.3.16/llama_cpp_python-0.3.16-cp311-cp311-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.11'" },
+    { url = "https://github.com/pnnbao97/VieNeu-TTS/releases/download/wheels-v0.3.16/llama_cpp_python-0.3.16-cp310-cp310-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.10'" },
+    { url = "https://github.com/pnnbao97/VieNeu-TTS/releases/download/wheels-v0.3.16/llama_cpp_python-0.3.16-cp313-cp313-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.13'" },
     { index = "llama-cpp-metal", marker = "sys_platform == 'darwin'" },
     { index = "pypi", marker = "sys_platform != 'win32' and sys_platform != 'darwin'" }
 ]

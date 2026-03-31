@@ -136,6 +136,112 @@ def split_text_into_chunks(text: str, max_chars: int = 256) -> List[str]:
 
     return [c.strip() for c in final_chunks if c.strip()]
 
+def split_into_chunks_v2(full_phones: str, max_chunk_size: int = 256, min_chunk_size: int = 10) -> List[str]:
+    """
+    Phân đoạn phonemes cho VieNeu v2 (Turbo).
+    1. Ưu tiên tách tối đa: Mỗi câu (.?!) là một chunk riêng.
+    2. Nếu câu quá dài (>max), tách tiếp theo dấu phụ (,:;-) hoặc space.
+    3. Gộp các chunk cực ngắn (<10) vào nhau để tránh bị cụt.
+    """
+    if not full_phones:
+        return []
+
+    # Bước 1: Tách theo đoạn (newline)
+    paragraphs = RE_NEWLINE.split(full_phones.strip())
+    raw_parts: List[str] = []
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        
+        # Bước 2: Luôn tách theo câu (.?!)
+        # Sử dụng pattern từ app_gguf.py cho phonemes
+        sentences = RE_SENTENCE_END.split(para)
+        for sent in sentences:
+            sent = sent.strip()
+            if not sent:
+                continue
+            
+            # Nếu câu quá dài, phải xé nhỏ tiếp
+            if len(sent) > max_chunk_size:
+                sub_parts = RE_MINOR_PUNCT.split(sent)
+                sub_buf = ""
+                for part in sub_parts:
+                    part = part.strip()
+                    if not part:
+                        continue
+
+                    if len(part) > max_chunk_size:
+                        # Flush sub_buf trước
+                        if sub_buf:
+                            raw_parts.append(sub_buf)
+                            sub_buf = ""
+                        # Xé theo space
+                        words = part.split()
+                        current = ""
+                        for word in words:
+                            if current and len(current) + 1 + len(word) > max_chunk_size:
+                                raw_parts.append(current)
+                                current = word
+                            else:
+                                current = (current + " " + word) if current else word
+                        if current:
+                            raw_parts.append(current)
+                    elif sub_buf and len(sub_buf) + 1 + len(part) > max_chunk_size:
+                        # sub_buf đầy, flush rồi bắt đầu mới
+                        raw_parts.append(sub_buf)
+                        sub_buf = part
+                    else:
+                        sub_buf = (sub_buf + " " + part) if sub_buf else part
+
+                if sub_buf:
+                    raw_parts.append(sub_buf)
+            else:
+                raw_parts.append(sent)
+
+    # Bước 3: Gộp các chunk quá ngắn (< min_chunk_size)
+    if not raw_parts:
+        return []
+
+    merged: List[str] = []
+    i = 0
+    while i < len(raw_parts):
+        current = raw_parts[i]
+        
+        # Nếu chunk hiện tại quá ngắn, cố gắng gộp với chunk kế tiếp
+        while len(current) < min_chunk_size and i + 1 < len(raw_parts):
+            next_p = raw_parts[i + 1]
+            # Chỉ gộp nếu không vượt quá giới hạn tối đa
+            if len(current) + 1 + len(next_p) <= max_chunk_size:
+                current = (current + " " + next_p).strip()
+                i += 1
+            else:
+                break
+        
+        merged.append(current)
+        i += 1
+
+    # Xử lý trường hợp chunk cuối cùng vẫn quá ngắn → gộp ngược vào trước
+    if len(merged) >= 2 and len(merged[-1]) < min_chunk_size:
+        last = merged.pop()
+        if len(merged[-1]) + 1 + len(last) <= max_chunk_size:
+            merged[-1] = (merged[-1] + " " + last).strip()
+        else:
+            merged.append(last)
+
+    return [m for m in merged if m]
+
+def get_silence_duration_v2(chunk_phones: str) -> float:
+    """Trả về thời gian silence dựa trên dấu câu cho bản v2."""
+    stripped = chunk_phones.strip()
+    # Kiểm tra dấu câu ở cuối chunk
+    if re.search(r'[\.\!\?\…]$', stripped):
+        return 0.3
+    elif re.search(r'[\,\;\:\-\u2013\u2014]$', stripped):
+        return 0.15
+    return 0.05
+
 def env_bool(name: str, default: bool = False) -> bool:
     """Get boolean value from environment variable."""
     v = os.getenv(name)

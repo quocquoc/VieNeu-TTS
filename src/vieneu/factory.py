@@ -1,8 +1,6 @@
-from .standard import VieNeuTTS
-from .fast import FastVieNeuTTS
-from .remote import RemoteVieNeuTTS
 
-def Vieneu(mode="standard", **kwargs):
+
+def Vieneu(mode="turbo", **kwargs):
     """
     Factory function for VieNeu-TTS.
 
@@ -15,14 +13,20 @@ def Vieneu(mode="standard", **kwargs):
     """
     match mode:
         case "remote" | "api":
+            from .remote import RemoteVieNeuTTS
             return RemoteVieNeuTTS(**kwargs)
         case "fast" | "gpu":
+            from .fast import FastVieNeuTTS
             return FastVieNeuTTS(**kwargs)
+        case "turbo":
+            from .turbo import TurboVieNeuTTS
+            return TurboVieNeuTTS(**kwargs)
         case "xpu":
             try:
                 from .core_xpu import XPUVieNeuTTS
                 return XPUVieNeuTTS(**kwargs)
             except Exception as e:
                 raise RuntimeError(f"Failed to load XPU backend. Ensure Intel GPU drivers and torch.xpu are installed: {e}") from e
-        case _:
+        case "standard":
+            from .standard import VieNeuTTS
             return VieNeuTTS(**kwargs)

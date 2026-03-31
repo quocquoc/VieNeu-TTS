@@ -1,5 +1,4 @@
 import numpy as np
-import torch
 import re
 import logging
 from typing import List, Dict, Optional, Any
@@ -70,6 +69,7 @@ def _compile_codec_with_triton(codec: Any) -> bool:
     """
     try:
         import triton
+        import torch
 
         if hasattr(codec, 'dec') and hasattr(codec.dec, 'resblocks'):
             if len(codec.dec.resblocks) > 2:
