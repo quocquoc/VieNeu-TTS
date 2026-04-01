@@ -31,7 +31,7 @@ explicit = true
 
 [project]
 name = "vieneu"
-version = "2.2.0"
+version = "2.3.0"
 description = "Advanced on-device Vietnamese TTS with instant voice cloning"
 readme = "README_PYPI.md"
 license = { file = "LICENSE" }
@@ -71,6 +71,7 @@ dependencies = [
     "PyYAML",
     "gradio>=5.49.1",
     "perth>=0.2.0",
+    "librosa>=0.11.0",
 ]
 
 [project.urls]
@@ -102,7 +103,6 @@ gpu = [
     "neucodec>=0.0.4",
     "torch",
     "torchaudio",
-    "librosa>=0.11.0",
     "datasets>=3.2.0",
     "perth>=0.2.0",
     "lmdeploy; sys_platform != 'darwin'",
