@@ -166,11 +166,15 @@ class BaseVieneuTTS(ABC):
         
         # Only convert to torch if explicitly requested or if we're not in turbo mode
         if isinstance(codes, list):
-            try:
-                import torch
-                codes = torch.tensor(codes, dtype=torch.long)
-            except ImportError:
-                codes = np.array(codes, dtype=np.int64)
+            if codes and isinstance(codes[0], float):
+                codes = np.array(codes, dtype=np.float32)
+            else:
+                # Là integer token sequence (Standard mode)
+                try:
+                    import torch
+                    codes = torch.tensor(codes, dtype=torch.long)
+                except ImportError:
+                    codes = np.array(codes, dtype=np.int64)
 
         return {"codes": codes, "text": voice_data["text"]}
 

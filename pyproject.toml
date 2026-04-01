@@ -31,7 +31,7 @@ explicit = true
 
 [project]
 name = "vieneu"
-version = "2.1.1"
+version = "2.2.0"
 description = "Advanced on-device Vietnamese TTS with instant voice cloning"
 readme = "README_PYPI.md"
 license = { file = "LICENSE" }
@@ -150,9 +150,6 @@ lmdeploy = [
 
 llama-cpp-python = [
     { url = "https://github.com/pnnbao97/VieNeu-TTS/releases/download/wheels-v0.3.16/llama_cpp_python-0.3.16-cp312-cp312-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.12'" },
-    { url = "https://github.com/pnnbao97/VieNeu-TTS/releases/download/wheels-v0.3.16/llama_cpp_python-0.3.16-cp311-cp311-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.11'" },
-    { url = "https://github.com/pnnbao97/VieNeu-TTS/releases/download/wheels-v0.3.16/llama_cpp_python-0.3.16-cp310-cp310-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.10'" },
-    { url = "https://github.com/pnnbao97/VieNeu-TTS/releases/download/wheels-v0.3.16/llama_cpp_python-0.3.16-cp313-cp313-win_amd64.whl", marker = "sys_platform == 'win32' and python_version == '3.13'" },
     { index = "llama-cpp-metal", marker = "sys_platform == 'darwin'" },
     { index = "pypi", marker = "sys_platform != 'win32' and sys_platform != 'darwin'" }
 ]

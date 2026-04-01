@@ -16,12 +16,22 @@
 
 ## ✨ Key Features
 - **Bilingual (English-Vietnamese)**: Smooth and natural transitions between languages powered by [sea-g2p](https://github.com/pnnbao97/sea-g2p).
-- **Instant Voice Cloning**: Clone any voice with just **3-5 seconds** of reference audio (GPU/Standard mode).
-- **Ultra-Fast Turbo Mode**: Optimized for CPU using GGUF and ONNX, requiring **NO GPU** and minimal RAM.
+- **Instant Voice Cloning**: Clone any voice with just **3-5 seconds** of reference audio (**Turbo v2** & GPU modes).
+- **Ultra-Fast Turbo Mode**: Optimized for both **CPU (GGUF)** and **GPU (LMDeploy)**, offering the fastest inference in the VieNeu family.
 - **AI Identification**: Built-in audio watermarking for responsible AI content creation.
 - **Production-Ready**: High-quality 24 kHz waveform generation, fully offline.
 
 https://github.com/user-attachments/assets/adb15c5b-185d-44e3-b7e4-417774cdef27
+
+## 📌 Table of Contents
+
+1. [🦜 Installation & Web UI](#installation)
+2. [📦 Using the Python SDK](#sdk)
+3. [🐳 Docker & Remote Server](#docker-remote)
+4. [🔬 Model Overview](#backbones)
+5. [🚀 Roadmap](#roadmap)
+6. [🤝 Support & Contact](#support)
+7. [📑 Citation](#citation)
 
 ---
 
@@ -67,13 +77,13 @@ The `vieneu` SDK now defaults to **Turbo mode** for maximum compatibility.
 
 ### Quick Start
 ```bash
-# Minimal installation (Turbo/CPU Only)
+# Minimal installation (Builds llama-cpp from source - may take a while)
 pip install vieneu
 
-# Optional: Pre-built llama-cpp-python for CPU (if building fails)
+# Optional: For Windows users (CPU pre-built)
 pip install vieneu --extra-index-url https://pnnbao97.github.io/llama-cpp-python-v0.3.16/cpu/
 
-# Optional: macOS Metal acceleration
+# Optional: For macOS users (ARM64/Apple Silicon - Enables Metal GPU acceleration)
 pip install vieneu --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal/
 ```
 
@@ -83,20 +93,51 @@ from vieneu import Vieneu
 # Initialize in Turbo mode (Default - Minimal dependencies)
 tts = Vieneu()
 
-# Synthesize speech (uses default Southern Male voice 'Xuân Vĩnh')
-text = "Trước đây, hệ thống điện chủ yếu sử dụng direct current, nhưng Tesla đã chứng minh rằng alternating current is more efficient."
+# 1. Simple synthesis (uses default Southern Male voice 'Xuân Vĩnh')
+text = "Hệ thống điện chủ yếu sử dụng alternating current because it is more efficient."
 audio = tts.infer(text=text)
 
 # Save to file
-tts.save(audio, "output.wav")
-print("💾 Saved to output.wav")
+tts.save(audio, "output_Xuân Vĩnh.wav")
+print("💾 Saved to output_Xuân Vĩnh.wav")
+
+# 2. Using a specific Preset Voice
+voices = tts.list_preset_voices()
+for desc, voice_id in voices:
+    print(f"Voice: {desc} (ID: {voice_id})")
+
+my_voice_id = voices[1][1] if len(voices) > 1 else voices[0][1] # Giọng Phạm Tuyên
+voice_data = tts.get_preset_voice(my_voice_id)
+
+audio_custom = tts.infer(text="Tôi đang nói bằng giọng của Bác sĩ Tuyên.", voice=voice_data)
+
+# 3. Save to file
+tts.save(audio_custom, "output_Phạm Tuyên.wav")
+print("💾 Saved to output_Phạm Tuyên.wav")
 ```
 
-### Advanced Modes
-| Mode | Description | Requirements |
-|---|---|---|
-| `turbo` | (Default) Ultra-fast CPU inference | `onnxruntime`, `llama-cpp-python` |
-| `remote` | Connect to a remote VieNeu API Server | `requests` |
+### 🦜 Zero-shot Voice Cloning (SDK) <a name="cloning"></a>
+
+Clone any voice with only **3-5 seconds** of audio using the local Turbo engine:
+
+```python
+from vieneu import Vieneu
+
+tts = Vieneu() # Defaults to Turbo mode
+
+# 1. Encode the reference audio
+# Supported formats: .wav, .mp3, .flac (5-10 seconds recommended)
+my_voice = tts.encode_reference("examples/audio_ref/example.wav")
+
+# 2. Synthesize with the cloned voice
+# No reference text required for Turbo v2!
+audio = tts.infer(
+    text="Đây là giọng nói được clone trực tiếp bằng SDK của VieNeu-TTS.", 
+    voice=my_voice  # accepts numpy array from encode_reference() or preset dict from get_preset_voice()
+)
+
+tts.save(audio, "cloned_voice.wav")
+```
 
 ---
 
@@ -164,7 +205,7 @@ if os.path.exists("examples/audio_ref/example_ngoc_huyen.wav"):
 *For full implementation details, see: [examples/main_remote.py](examples/main_remote.py)*
 
 ### Voice Preset Specification (v1.0)
-VieNeu-TTS uses the official `vieneu.voice.presets` specification to define reusable voice assets. Only `voices.json` files following this spec are guaranteed to be compatible with VieNeu-TTS SDK \u2265 v1.x.
+VieNeu-TTS uses the official `vieneu.voice.presets` specification to define reusable voice assets. Only `voices.json` files following this spec are guaranteed to be compatible with VieNeu-TTS SDK ≥ v1.x.
 
 ### 3. Advanced Configuration
 
@@ -191,7 +232,7 @@ docker run --gpus all \
 
 | Model | Format | Device | Bilingual | Cloning | Speed |
 |---|---|---|---|---|---|
-| **VieNeu-v2-Turbo** | GGUF/ONNX | **CPU**/GPU | ✅ | ❌ (Coming soon) | **Extreme** |
+| **VieNeu-v2-Turbo** | GGUF/ONNX | **CPU/GPU** | ✅ | ✅ Yes | **Extreme** |
 | **VieNeu-TTS-v2** | PyTorch | GPU | ✅ | ✅ Yes | **Standard** (Coming soon) |
 | **VieNeu-TTS 0.3B** | PyTorch | GPU/CPU | ❌ | ✅ Yes | **Very Fast** |
 | **VieNeu-TTS** | PyTorch | GPU/CPU | ❌ | ✅ Yes | **Standard** |
@@ -202,17 +243,17 @@ docker run --gpus all \
 
 ---
 
-## 🚀 Roadmap <a name="roadmap"></a>
+## 🚀 5. Roadmap <a name="roadmap"></a>
 
 - [x] **VieNeu-TTS-v2 Turbo**: English-Vietnamese code-switching support.
 - [x] **VieNeu-Codec**: Optimized neural codec for Vietnamese (ONNX).
 - [ ] **VieNeu-TTS-v2 (Non-Turbo)**: Full high-fidelity bilingual architecture with instant **Voice Cloning** and **LMDeploy** GPU acceleration support.
-- [ ] **Turbo Voice Cloning**: Bringing instant cloning to the lightweight Turbo engine.
+- [x] **Turbo Voice Cloning**: Bringing instant cloning to the lightweight Turbo engine.
 - [ ] **Mobile SDK**: Official support for Android/iOS deployment.
 
 ---
 
-## 🤝 Support & Contact <a name="support"></a>
+## 🤝 6. Support & Contact <a name="support"></a>
 
 - **Hugging Face:** [pnnbao-ump](https://huggingface.co/pnnbao-ump)
 - **Discord:** [Join our community](https://discord.gg/yJt8kzjzWZ)
@@ -220,5 +261,38 @@ docker run --gpus all \
 - **License:** Apache 2.0 (Free to use).
 
 ---
+## 📑 7. Citation <a name="citation"></a>
+
+```bibtex
+@misc{vieneutts2026,
+  title        = {VieNeu-TTS: Vietnamese Text-to-Speech with Instant Voice Cloning},
+  author       = {Pham Nguyen Ngoc Bao},
+  year         = {2026},
+  publisher    = {Hugging Face},
+  howpublished = {\url{https://huggingface.co/pnnbao-ump/VieNeu-TTS}}
+}
+```
+
+---
+
+## 🌟 Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=pnnbao97/VieNeu-TTS&type=Date)](https://star-history.com/#pnnbao97/VieNeu-TTS&Date)
+
+---
+
+## 🤝 Contributors
+
+Thanks to all the amazing people who have contributed to this project!
+
+<a href="https://github.com/pnnbao97/VieNeu-TTS/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=pnnbao97/VieNeu-TTS" />
+</a>
+
+---
+
+## 🙏 Acknowledgements
+
+This project uses [neucodec](https://huggingface.co/neuphonic/neucodec) for audio decoding and [sea-g2p](https://github.com/pnnbao97/sea-g2p) for text normalization and phonemization.
 
 **Made with ❤️ for the Vietnamese TTS community**

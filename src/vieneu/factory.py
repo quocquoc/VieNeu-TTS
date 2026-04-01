@@ -21,6 +21,9 @@ def Vieneu(mode="turbo", **kwargs):
         case "turbo":
             from .turbo import TurboVieNeuTTS
             return TurboVieNeuTTS(**kwargs)
+        case "turbo_gpu":
+            from .turbo import TurboGPUVieNeuTTS
+            return TurboGPUVieNeuTTS(**kwargs)
         case "xpu":
             try:
                 from .core_xpu import XPUVieNeuTTS

@@ -40,12 +40,17 @@ if HAS_GPU:
     filtered_backbones["VieNeu-TTS (GPU)"] = {
         "repo": "pnnbao-ump/VieNeu-TTS",
         "supports_streaming": False,
-        "description": "⭐ Chất lượng cao nhất, yêu cầu GPU/MPS"
+        "description": "⭐ Chất lượng cao nhất, yêu cầu GPU"
     }
     filtered_backbones["VieNeu-TTS-0.3B (GPU)"] = {
         "repo": "pnnbao-ump/VieNeu-TTS-0.3B",
         "supports_streaming": False,
-        "description": "⚡ Bản 0.3B tối ưu cho GPU, rất nhanh và chính xác"
+        "description": "⚡ Bản 0.3B tối ưu cho GPU, rất nhanh"
+    }
+    filtered_backbones["VieNeu-TTS-v2-Turbo (GPU)"] = {
+        "repo": "pnnbao-ump/VieNeu-TTS-v2-Turbo",
+        "supports_streaming": False,
+        "description": "🚀 Turbo v2 (GPU): Hỗ trợ bilingual (Anh-Việt), tối ưu cho GPU"
     }
 
 filtered_backbones["VieNeu-TTS-v2-Turbo (CPU)"] = {
@@ -133,9 +138,8 @@ def get_model_status_message() -> str:
         codec_device = "CPU"
     else:
         codec_device = "GPU/MPS" if (torch.cuda.is_available() if 'torch' in sys.modules else False) or (torch.backends.mps.is_available() if 'torch' in sys.modules else False) else "CPU"
-    
-    preencoded_note = "\n⚠️ Codec ONNX không hỗ trợ chức năng clone giọng nói." if codec_config.get('use_preencoded') else ""
-    
+
+    preencoded_note = ""    
     opt_info = ""
     if using_lmdeploy and hasattr(tts, 'get_optimization_stats'):
         stats = tts.get_optimization_stats()
@@ -269,6 +273,7 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
             backbone_config = BACKBONE_CONFIGS[backbone_choice]
             
         codec_config = CODEC_CONFIGS[codec_choice]
+        use_lmdeploy = False
         
         # Override LMDeploy if custom
         if custom_loading:
@@ -281,11 +286,16 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
              else:
                  # Full custom model (e.g. finetune)
                  use_lmdeploy = force_lmdeploy and should_use_lmdeploy("VieNeu-TTS (GPU)", device_choice) # Assume GPU compatible?
+        # Use LMDeploy only if Force LMDeploy is set and the model is compatible
+        # NOTE: For VieNeu-v2-Turbo, we handle LMDeploy inside TurboGPUVieNeuTTS class, 
+        # so we set use_lmdeploy = False here to avoid generic FastVieNeuTTS loading.
+        if "v2-Turbo" in backbone_choice:
+             should_use_generic_fast = False
         else:
-             if "v2-Turbo" in backbone_choice:
-                 use_lmdeploy = False # v2 Turbo uses dedicated backend
-             else:
-                 use_lmdeploy = force_lmdeploy and should_use_lmdeploy(backbone_choice, device_choice)
+             should_use_generic_fast = force_lmdeploy and should_use_lmdeploy(backbone_choice, device_choice)
+             
+        if should_use_generic_fast:
+            use_lmdeploy = True
         
         if use_lmdeploy:
             lmdeploy_error_reason = None
@@ -476,7 +486,8 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
                 if "ONNX" in codec_choice:
                     codec_device = "cpu"
 
-            if ("gguf" in backbone_config['repo'].lower() or "v2-turbo" in backbone_config['repo'].lower()) and backbone_device == "cuda":
+            if "gguf" in backbone_config['repo'].lower() and backbone_device == "cuda":
+                # Only Llama-cpp (GGUF) uses the 'gpu' string for CUDA
                 backbone_device = "gpu"
             
             print(f"📦 Loading model...")
@@ -486,11 +497,13 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
             if "v2-Turbo" in backbone_choice:
                 # VieNeu v2 Turbo uses the dedicated backend
                 print("   ⚡ Mode: Turbo")
+                mode = "turbo_gpu" if "GPU" in backbone_choice else "turbo"
                 tts = Vieneu(
-                    mode="turbo",
+                    mode=mode,
                     backbone_repo=backbone_config["repo"],
                     decoder_repo=codec_config["repo"],
                     device=backbone_device,
+                    backend="lmdeploy" if force_lmdeploy and "GPU" in backbone_choice else "standard",
                     hf_token=custom_hf_token
                 )
             else:
@@ -692,19 +705,17 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
             voice_data = tts.get_preset_voice(voice_choice)
             ref_codes = voice_data['codes']
             ref_text_raw = voice_data['text']
-            
+        
         elif mode_tab == "custom_mode":
-            # Reference from Custom Cloning UI
             if custom_audio is None:
-                 raise ValueError("Vui lòng upload file Audio mẫu (Reference Audio)!")
-            if not custom_text or not custom_text.strip():
-                 raise ValueError("Vui lòng nhập nội dung văn bản của Audio mẫu (Reference Text)!")
+                raise ValueError("Vui lòng upload file Audio mẫu (Reference Audio)!")
             
-            ref_text_raw = custom_text.strip()
+            is_turbo = "v2-Turbo" in (current_backbone or "")
+            if not is_turbo and (not custom_text or not custom_text.strip()):
+                raise ValueError("Vui lòng nhập nội dung văn bản của Audio mẫu (Reference Text)!")
+            
+            ref_text_raw = custom_text.strip() if custom_text else ""
             ref_codes = tts.encode_reference(custom_audio)
-            
-        else:
-            raise ValueError(f"Unknown mode: {mode_tab}")
 
         # Ensure numpy for inference
         if 'torch' in sys.modules:
@@ -754,7 +765,7 @@ def synthesize_speech(text: str, voice_choice: str, custom_audio, custom_text: s
                     yield None, f"⚡ Turbo v2: Đang xử lý đoạn {i+1}/{total_chunks}..."
                     
                     chunk_wav = tts.infer(
-                        chunk, 
+                        chunk.text, 
                         ref_codes=ref_codes, 
                         temperature=temperature,
                         max_chars=max_chars_chunk,
@@ -1149,7 +1160,7 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             <span>•</span>
             <a href="https://huggingface.co/pnnbao-ump/VieNeu-TTS-0.3B" target="_blank" class="model-card-link">VieNeu-TTS-0.3B</a>
             <span>•</span>
-            <a href="https://huggingface.co/pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF" target="_blank" class="model-card-link">VieNeu-TTS-v2 (Turbo)</a>
+            <a href="https://huggingface.co/pnnbao-ump/VieNeu-TTS-v2-Turbo" target="_blank" class="model-card-link">VieNeu-TTS-v2 (Turbo)</a>
         </div>
         <div class="model-card-item">
             <strong>Repository:</strong>
@@ -1172,7 +1183,7 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             with gr.Row():
                 backbone_select = gr.Dropdown(
                     list(BACKBONE_CONFIGS.keys()) + ["Custom Model"], 
-                    value="VieNeu-TTS-v2-Turbo (CPU)" if "VieNeu-TTS-v2-Turbo (CPU)" in BACKBONE_CONFIGS else list(BACKBONE_CONFIGS.keys())[0], 
+                    value="VieNeu-TTS-v2-Turbo (GPU)" if "VieNeu-TTS-v2-Turbo (GPU)" in BACKBONE_CONFIGS else ("VieNeu-TTS-v2-Turbo (CPU)" if "VieNeu-TTS-v2-Turbo (CPU)" in BACKBONE_CONFIGS else list(BACKBONE_CONFIGS.keys())[0]), 
                     label="🦜 Backbone"
                 )
                 codec_select = gr.Dropdown(
@@ -1181,7 +1192,7 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
                     label="🎵 Codec",
                     interactive=False
                 )
-                device_choice = gr.Radio(["CPU"], value="CPU", label="🖥️ Device")
+                device_choice = gr.Radio(get_available_devices(), value="Auto", label="🖥️ Device")
             
             with gr.Row(visible=False) as custom_model_group:
                 custom_backbone_model_id = gr.Textbox(
@@ -1234,13 +1245,13 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
                     <div class="warning-banner-item">
                         <strong>🐆 Hệ máy GPU</strong>
                         <div class="warning-banner-content">
-                            Để có độ chính xác cao nhất và giọng đọc tự nhiên nhất, hãy sử dụng <b>VieNeu-TTS (Mặc định - GPU)</b>. Chọn <b>VieNeu-TTS-0.3B (GPU)</b> để tăng tốc độ lên gấp 2 lần (độ chính xác đạt khoảng 80% so với bản gốc). 
+                            Phiên bản <b>VieNeu-TTS-v2 Turbo</b> đã hỗ trợ song ngữ Anh Việt (code-switching) mượt mà và tốc độ rất nhanh - tuy nhiên vẫn đang trong quá trình thử nghiệm. Trong trường hợp bạn cần sự ổn định, hãy sử dụng version 1, để có độ chính xác cao nhất và giọng đọc tự nhiên nhất, hãy sử dụng <b>VieNeu-TTS (Mặc định - GPU)</b>. Chọn <b>VieNeu-TTS-0.3B (GPU)</b> để tăng tốc độ lên gấp 2 lần (độ chính xác đạt khoảng 80% so với bản gốc). 
                         </div>
                     </div>
                     <div class="warning-banner-item" style="background: #dcfce7; border-color: #86efac;">
-                        <strong style="color: #15803d;">🚀 Sắp ra mắt: VieNeu-TTS-v2</strong>
+                        <strong style="color: #15803d;">🚀 VieNeu-TTS-v2</strong>
                         <div class="warning-banner-content" style="color: #166534;">
-                            Phiên bản <b>VieNeu-TTS-v2</b> đầy đủ đang được phát triển với khả năng đọc <b>song ngữ Anh-Việt (Code-switching)</b> và <b>Voice Cloning</b> chất lượng cao. Phiên bản <b>Turbo v2</b> (tối ưu cho CPU) đã được ra mắt sớm để người dùng trải nghiệm trước.
+                            Phiên bản <b>VieNeu-TTS-v2</b> đang trong quá trình phát triển nhằm hỗ trợ <b>song ngữ Anh-Việt</b>. Phiên bản <b>v2 Turbo</b> được ra mắt trước nhằm mục đích thử nghiệm.
                         </div>
                     </div>
                 </div>
@@ -1264,13 +1275,13 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
                         voice_select = gr.Dropdown(choices=[], value=None, label="Giọng mẫu")
                     
                     with gr.TabItem("🦜 Voice Cloning", id="custom_mode") as tab_custom:
-                        turbo_v2_cloning_notice = gr.Markdown(
-                            "⚠️ **Thông báo:** Bản Turbo không hỗ trợ chức năng Voice Cloning. Vui lòng sử dụng bản **VieNeu-TTS (GPU)** hoặc chờ đến khi phiên bản **VieNeu-TTS-v2** chính thức ra mắt.", 
-                            visible=True,
-                            elem_id="turbo-cloning-notice"
-                        )
+                        # turbo_v2_cloning_notice = gr.Markdown(
+                        #     "⚠️ **Thông báo:** Bản Turbo không hỗ trợ chức năng Voice Cloning. Vui lòng sử dụng bản **VieNeu-TTS (GPU)** hoặc chờ đến khi phiên bản **VieNeu-TTS-v2** chính thức ra mắt.", 
+                        #     visible=True,
+                        #     elem_id="turbo-cloning-notice"
+                        # )
                         
-                        with gr.Group(visible=False) as cloning_elements_group:
+                        with gr.Group(visible=True) as cloning_elements_group:
                             custom_audio = gr.Audio(label="Audio giọng mẫu (3-5 giây) (.wav)", type="filepath")
                             cloning_warning_msg = gr.Markdown(visible=False, elem_id="cloning-warning")
                             custom_text = gr.Textbox(label="Nội dung audio mẫu - vui lòng gõ đúng nội dung của audio mẫu - kể cả dấu câu vì model rất nhạy cảm với dấu câu (.,?!)")
@@ -1395,42 +1406,34 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
 
         def on_backbone_change(choice):
             is_custom = (choice == "Custom Model")
+            print(f"   🔄 Backbone changed to: {choice}")
             
-            # Default params per user requirement
-            if is_custom:
-                return (
-                    gr.update(visible=True), 
-                    gr.update(interactive=True), 
-                    gr.update(), 
-                    gr.update(),
-                    gr.update(choices=get_available_devices(), value="Auto"),
-                    gr.update(visible=False), # turbo notice
-                    gr.update(visible=True)   # cloning group
-                )
+            # 1. Device logic - Always allow GPU options if model is marked (GPU)
+            is_gpu_model = "(GPU)" in choice or is_custom
+            if is_gpu_model:
+                dev_choices = get_available_devices()
+                initial_dev = "Auto"
+            else:
+                dev_choices = ["CPU"]
+                initial_dev = "CPU"
             
+            # 2. Parameter logic
             if "Turbo" in choice:
                 codec_update = gr.update(value="VieNeu-Codec", interactive=False)
                 text_update = gr.update(value=DEFAULT_TEXT_TURBO)
                 temp_update = gr.update(value=0.4)
-                device_update = gr.update(choices=["CPU"], value="CPU")
-                turbo_notice_update = gr.update(visible=True)
-                cloning_group_update = gr.update(visible=False)
             else:
                 codec_update = gr.update(value="NeuCodec (Distill)", interactive=False)
                 text_update = gr.update(value=DEFAULT_TEXT_GPU)
                 temp_update = gr.update(value=0.7)
-                device_update = gr.update(choices=get_available_devices(), value="Auto")
-                turbo_notice_update = gr.update(visible=False)
-                cloning_group_update = gr.update(visible=True)
                 
             return (
                 gr.update(visible=is_custom), 
                 codec_update, 
                 text_update, 
                 temp_update, 
-                device_update,
-                turbo_notice_update,
-                cloning_group_update
+                gr.update(choices=dev_choices, value=initial_dev),
+                gr.update(visible=True)
             )
 
         backbone_select.change(
@@ -1442,7 +1445,6 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
                 text_input, 
                 temperature_slider, 
                 device_choice,
-                turbo_v2_cloning_notice,
                 cloning_elements_group
             ]
         )

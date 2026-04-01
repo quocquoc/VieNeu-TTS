@@ -1,192 +1,482 @@
 import os
 import numpy as np
 import logging
-from typing import Optional, List, Dict, Any, Generator
+from typing import Optional, List, Any, Generator
+from pathlib import Path
 from .base import BaseVieneuTTS
 from vieneu_utils.phonemize_text import phonemize_text
 from vieneu_utils.core_utils import split_into_chunks_v2, get_silence_duration_v2
 
 logger = logging.getLogger("Vieneu.Turbo")
 
-# Built-in voices for Turbo v2
-TURBO_VOICE_ID_MAP = {
-    "Xuân Vĩnh (Nam - Miền Nam)": 3,
-    "Đoan Trang (Nữ - Miền Bắc)": 0,
-    "Thục Đoan (Nữ - Miền Nam)": 1,
-    "Phạm Tuyên (Nam - Miền Bắc)": 2,
-}
+class TurboGPUVieNeuTTS(BaseVieneuTTS):
+    def __init__(
+        self,
+        backbone_repo: str = "pnnbao-ump/VieNeu-TTS-v2-Turbo",
+        decoder_repo: str = "pnnbao-ump/VieNeu-Codec",
+        decoder_filename: str = "vieneu_decoder.onnx",
+        encoder_repo: str = "pnnbao-ump/VieNeu-Codec",
+        encoder_filename: str = "vieneu_encoder.onnx",
+        device: str = "cuda",
+        backend: str = "standard", # 'standard' (transformers) or 'lmdeploy'
+        hf_token: Optional[str] = None,
+        **kwargs
+    ):
+        super().__init__()
+        # Normalize device: PyTorch expects 'cuda', Gradio might pass 'gpu'
+        self.device = "cuda" if device.lower() in ["cuda", "gpu"] else "cpu"
+        self.backend = backend.lower()
+        self.backbone = None
+        self.tokenizer = None
+        self.decoder_sess = None
+        self.encoder_sess = None
+        self._is_onnx_codec = True
+        
+        # Load components
+        self._load_backbone(backbone_repo, device, hf_token, **kwargs)
+        self._load_decoder(decoder_repo, decoder_filename, device, hf_token)
+        self._load_encoder(encoder_repo, encoder_filename, device, hf_token)
+        
+        # Load voices
+        self._load_voices(backbone_repo, hf_token)
+
+    def _load_backbone(self, repo, device, hf_token=None, **kwargs):
+        if self.backend == "lmdeploy":
+            try:
+                from lmdeploy import pipeline, TurbomindEngineConfig, GenerationConfig
+                logger.info(f"Loading Turbo GPU (LMDeploy) from: {repo}")
+                
+                engine_config = TurbomindEngineConfig(
+                    cache_max_entry_count=kwargs.get("memory_util", 0.3),
+                    tp=kwargs.get("tp", 1),
+                    enable_prefix_caching=kwargs.get("enable_prefix_caching", True),
+                    dtype='bfloat16' if self.device == "cuda" else 'float16'
+                )
+                self.backbone = pipeline(repo, backend_config=engine_config)
+                self.gen_config = GenerationConfig(
+                    top_p=0.95, top_k=50, temperature=0.4, max_new_tokens=2048,
+                    do_sample=True, stop_words=["<|SPEECH_GENERATION_END|>"]
+                )
+            except ImportError:
+                logger.warning("LMDeploy not found. Falling back to Standard (Transformers).")
+                self.backend = "standard"
+
+        if self.backend == "standard":
+            from transformers import AutoTokenizer, AutoModelForCausalLM
+            import torch
+            
+            logger.info(f"Loading Turbo GPU (Standard) from: {repo} on {self.device}")
+            self.tokenizer = AutoTokenizer.from_pretrained(repo, token=hf_token)
+            self.backbone = AutoModelForCausalLM.from_pretrained(
+                repo, 
+                torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
+                token=hf_token
+            ).to(self.device)
+            self.backbone.eval()
+
+    def _load_decoder(self, decoder_repo, decoder_filename, device, hf_token=None):
+        import onnxruntime as ort
+        if os.path.exists(decoder_repo) and not os.path.isdir(decoder_repo):
+            decoder_path = decoder_repo
+        else:
+            from huggingface_hub import hf_hub_download
+            decoder_path = hf_hub_download(
+                repo_id=decoder_repo, filename=decoder_filename, token=hf_token
+            )
+        
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "cuda" in device or "gpu" in device else ["CPUExecutionProvider"]
+        self.decoder_sess = ort.InferenceSession(decoder_path, providers=providers)
+
+    def _load_encoder(self, encoder_repo, encoder_filename, device, hf_token=None):
+        import onnxruntime as ort
+        if os.path.exists(encoder_repo) and not os.path.isdir(encoder_repo):
+            encoder_path = encoder_repo
+        else:
+            from huggingface_hub import hf_hub_download
+            try:
+                encoder_path = hf_hub_download(
+                    repo_id=encoder_repo, filename=encoder_filename, token=hf_token
+                )
+            except Exception:
+                logger.warning("Speaker encoder not found for Turbo GPU.")
+                return
+
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "cuda" in device or "gpu" in device else ["CPUExecutionProvider"]
+        self.encoder_sess = ort.InferenceSession(encoder_path, providers=providers)
+
+    def _get_voice_params(self, ref_codes: Any) -> np.ndarray:
+        if isinstance(ref_codes, dict):
+            ref_codes = ref_codes.get("codes")
+        if isinstance(ref_codes, (np.ndarray, list)):
+            emb = np.array(ref_codes, dtype=np.float32)
+            if emb.ndim == 1:
+                emb = emb[None, :]
+            return emb
+        return np.zeros((1, 128), dtype=np.float32)
+
+    def encode_reference(self, ref_audio: Any) -> np.ndarray:
+        """Standalone ONNX implementation for speaker encoding in Turbo GPU mode."""
+        if self.encoder_sess is None:
+            raise RuntimeError("Speaker encoder model not loaded for Turbo GPU.")
+        
+        import librosa
+        if isinstance(ref_audio, (str, Path)):
+            wav, _ = librosa.load(ref_audio, sr=24000)
+        else:
+            wav = ref_audio
+        
+        if wav.ndim == 1:
+            wav = wav[None, :]
+        
+        inputs = {"waveform": wav.astype(np.float32)}
+        embedding = self.encoder_sess.run(None, inputs)[0]
+        return embedding
+
+    def _format_turbo_prompt(self, phonemes: str) -> str:
+        return (
+            f"<|speaker_16|>"
+            f"<|TEXT_PROMPT_START|>{phonemes}<|TEXT_PROMPT_END|>"
+            f"<|SPEECH_GENERATION_START|>"
+        )
+
+    def infer(self, text: str, voice: Optional[Any] = None, ref_codes: Optional[Any] = None, temperature: float = 0.4, top_k: int = 50, max_chars: int = 256, skip_normalize: bool = False, skip_phonemize: bool = False, **kwargs) -> np.ndarray:
+        from vieneu_utils.phonemize_text import phonemize_text
+        from vieneu_utils.core_utils import split_into_chunks_v2, get_silence_duration_v2
+
+        phonemes = phonemize_text(text) if not skip_phonemize else text
+        chunks = split_into_chunks_v2(phonemes, max_chunk_size=max_chars)
+        
+        if voice is None:
+            voice = ref_codes
+        if voice is None:
+            voice = self.get_preset_voice()
+        voice_embedding = self._get_voice_params(voice)
+
+        all_wavs = []
+        for i, chunk in enumerate(chunks):
+            prompt = self._format_turbo_prompt(chunk.text)
+            
+            if self.backend == "lmdeploy":
+                self.gen_config.temperature = temperature
+                self.gen_config.top_k = top_k
+                responses = self.backbone([prompt], gen_config=self.gen_config, do_preprocess=False)
+                generated_text = responses[0].text
+            else:
+                import torch
+                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+                with torch.no_grad():
+                    output_tokens = self.backbone.generate(
+                        **inputs,
+                        max_new_tokens=2048,
+                        temperature=temperature,
+                        top_k=top_k,
+                        do_sample=True,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                        # stop_strings=... is transformers >= 4.41.0
+                        # For compatibility, we trim the output if eos is hit
+                    )
+                generated_text = self.tokenizer.decode(output_tokens[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True)
+            
+            wav = self._decode(generated_text, voice_embedding)
+            all_wavs.append(wav)
+
+            if i < len(chunks) - 1:
+                silence_dur = get_silence_duration_v2(chunk)
+                if silence_dur > 0:
+                    all_wavs.append(np.zeros(int(self.sample_rate * silence_dur), dtype=np.float32))
+
+        final_wav = np.concatenate(all_wavs) if len(all_wavs) > 1 else all_wavs[0]
+        return self._apply_watermark(final_wav)
+
+    def infer_batch(
+        self, 
+        texts: List[str], 
+        voice: Optional[Any] = None, 
+        ref_codes: Optional[Any] = None, 
+        temperature: float = 0.4, 
+        top_k: int = 50, 
+        max_batch_size: int = 4, 
+        skip_normalize: bool = False, 
+        skip_phonemize: bool = False, 
+        apply_watermark: bool = True, 
+        **kwargs
+    ) -> List[np.ndarray]:
+        """Batch inference for Turbo GPU."""
+        from vieneu_utils.phonemize_text import phonemize_batch
+        
+        if voice is None:
+            voice = ref_codes
+        if voice is None:
+            voice = self.get_preset_voice()
+        voice_embedding = self._get_voice_params(voice)
+
+        chunk_phonemes = phonemize_batch(texts, skip_normalize=True) if not skip_phonemize else texts
+        
+        all_wavs = []
+        for i in range(0, len(texts), max_batch_size):
+            batch_texts = texts[i : i + max_batch_size]
+            batch_ph = chunk_phonemes[i : i + max_batch_size]
+            
+            if self.backend == "lmdeploy":
+                prompts = [self._format_turbo_prompt(ph) for ph in batch_ph]
+                self.gen_config.temperature = temperature
+                self.gen_config.top_k = top_k
+                responses = self.backbone(prompts, gen_config=self.gen_config, do_preprocess=False)
+                batch_codes = [r.text for r in responses]
+                batch_wavs = [self._decode(c, voice_embedding) for c in batch_codes]
+            else:
+                # Standard sequential fallback for transformers
+                batch_wavs = [
+                    self.infer(
+                        t, 
+                        voice=voice, 
+                        ref_codes=ref_codes, 
+                        temperature=temperature, 
+                        top_k=top_k, 
+                        skip_normalize=True, 
+                        skip_phonemize=True
+                    ) for t in batch_texts
+                ]
+            
+            if apply_watermark:
+                batch_wavs = [self._apply_watermark(w) for w in batch_wavs]
+            all_wavs.extend(batch_wavs)
+        
+        return all_wavs
+
+    def _decode(self, codes_str: str, voice_embedding: np.ndarray) -> np.ndarray:
+        from .utils import extract_speech_ids
+        speech_ids = extract_speech_ids(codes_str)
+        if not speech_ids:
+            return np.array([], dtype=np.float32)
+        
+        tokens = np.array(speech_ids, dtype=np.int64)[None, :]
+        inputs = {
+            "content_ids": tokens, 
+            "voice_embedding": voice_embedding
+        }
+        audio = self.decoder_sess.run(None, inputs)[0]
+        return audio.flatten()
+
+    def infer_stream(
+        self,
+        text: str,
+        voice: Optional[Any] = None,
+        ref_codes: Optional[Any] = None,
+        temperature: float = 0.4,
+        top_k: int = 50,
+        max_chars: int = 256,
+        skip_normalize: bool = False,
+        skip_phonemize: bool = False,
+        **kwargs
+    ) -> Generator[np.ndarray, None, None]:
+        """Streaming inference for Turbo GPU."""
+        from vieneu_utils.phonemize_text import phonemize_text
+        from vieneu_utils.core_utils import split_into_chunks_v2, get_silence_duration_v2
+
+        phonemes = phonemize_text(text) if not skip_phonemize else text
+        chunks = split_into_chunks_v2(phonemes, max_chunk_size=max_chars)
+        
+        if voice is None:
+            voice = ref_codes
+        if voice is None:
+            voice = self.get_preset_voice()
+        voice_embedding = self._get_voice_params(voice)
+
+        for i, chunk in enumerate(chunks):
+            prompt = self._format_turbo_prompt(chunk.text)
+            
+            if self.backend == "lmdeploy":
+                # Ensure gen_config uses current parameters
+                self.gen_config.temperature = temperature
+                self.gen_config.top_k = top_k
+                responses = self.backbone([prompt], gen_config=self.gen_config, do_preprocess=False)
+                generated_text = responses[0].text
+            else:
+                import torch
+                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+                with torch.no_grad():
+                    output_tokens = self.backbone.generate(
+                        **inputs,
+                        max_new_tokens=2048,
+                        temperature=temperature,
+                        top_k=top_k,
+                        do_sample=True,
+                        pad_token_id=self.tokenizer.eos_token_id,
+                    )
+                generated_text = self.tokenizer.decode(output_tokens[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True)
+            
+            wav = self._decode(generated_text, voice_embedding)
+            yield self._apply_watermark(wav)
+
+            if i < len(chunks) - 1:
+                silence_dur = get_silence_duration_v2(chunk)
+                if silence_dur > 0:
+                    yield np.zeros(int(self.sample_rate * silence_dur), dtype=np.float32)
+
+    def close(self):
+        self.backbone = None
+        self.decoder_sess = None
+        self.encoder_sess = None
+
+
 
 class TurboVieNeuTTS(BaseVieneuTTS):
-    """
-    Ultra-lightweight VieNeu-TTS implementation.
-    Uses GGUF (llama-cpp-python) and ONNX Runtime. 
-    Does NOT require torch or neucodec.
-    """
-
     def __init__(
         self,
         backbone_repo: str = "pnnbao-ump/VieNeu-TTS-v2-Turbo-GGUF",
         backbone_filename: str = "vieneu-tts-v2-turbo.gguf",
         decoder_repo: str = "pnnbao-ump/VieNeu-Codec",
         decoder_filename: str = "vieneu_decoder.onnx",
+        encoder_repo: str = "pnnbao-ump/VieNeu-Codec",
+        encoder_filename: str = "vieneu_encoder.onnx",
         device: str = "cpu",
         hf_token: Optional[str] = None,
+        **kwargs
     ):
         super().__init__()
         self.backbone = None
         self.decoder_sess = None
+        self.encoder_sess = None
         self._is_onnx_codec = True
-        self.max_context = 4096 # Match v2 turbo requirement
+        self.max_context = 4096
         
+        # Load components
         self._load_backbone(backbone_repo, backbone_filename, device, hf_token)
         self._load_decoder(decoder_repo, decoder_filename, device, hf_token)
-        # For Turbo, we use built-in map + speaker_embeddings.json
-        self._load_voices()
-
-    def _load_voices(self) -> None:
-        """Load external speaker embeddings if available."""
-        self._preset_voices = TURBO_VOICE_ID_MAP.copy()
-        # Set first voice as default
-        if self._preset_voices:
-            self._default_voice = next(iter(self._preset_voices))
+        self._load_encoder(encoder_repo, encoder_filename, device, hf_token)
         
-    def list_preset_voices(self) -> List[str]:
-        return list(self._preset_voices.keys())
+        # Load voices from the repository/directory (uses voices.json)
+        self._load_voices(backbone_repo, hf_token)
 
-    def get_preset_voice(self, name: str) -> Dict[str, Any]:
-        if name not in self._preset_voices:
-            raise ValueError(f"Voice '{name}' not found.")
-            
-        voice_id = self._preset_voices[name]
-        embedding = None
-        
-        if voice_id == -1:
-            # It's in speaker_embeddings.json
-            embedding = self._speaker_embeddings.get(name)
-            
-        return {
-            "name": name,
-            "voice_id": voice_id,
-            "codes": voice_id if voice_id >= 0 else embedding, # Pass voice_id as codes if builtin
-            "text": "" # No reference text needed for Turbo v2
-        }
-
-    def _load_backbone(self, backbone_repo: str, backbone_filename: str, device: str, hf_token: Optional[str] = None) -> None:
+    def _load_backbone(self, backbone_repo, backbone_filename, device, hf_token=None):
         try:
             from llama_cpp import Llama
         except ImportError:
-            raise ImportError("llama-cpp-python is required for Turbo mode. Install with: pip install llama-cpp-python")
+            raise ImportError("llama-cpp-python is required for Turbo mode.")
 
-        logger.info(f"🚀 Loading GGUF backbone: {backbone_repo}")
-        
         if os.path.exists(backbone_repo):
-            # Local file path
             model_path = backbone_repo
         else:
-            # HuggingFace repo or direct filename
             from huggingface_hub import hf_hub_download
             try:
                 model_path = hf_hub_download(
-                    repo_id=backbone_repo,
-                    filename=backbone_filename,
-                    token=hf_token
+                    repo_id=backbone_repo, filename=backbone_filename, token=hf_token
                 )
             except Exception:
-                # If backbone_repo was actually a direct local filename but doesn't exist
                 if os.path.exists(backbone_filename):
                     model_path = backbone_filename
                 else:
-                    raise FileNotFoundError(f"Neither repo '{backbone_repo}' nor local file '{backbone_filename}' found.")
+                    raise FileNotFoundError(f"Neither repo '{backbone_repo}' nor '{backbone_filename}' found.")
 
         self.backbone = Llama(
             model_path=model_path,
             n_ctx=self.max_context,
             n_gpu_layers=-1 if device in ("gpu", "cuda") else 0,
             mlock=True,
-            flash_attn=True if device in ("gpu", "cuda") else False,
+            flash_attn=device in ("gpu", "cuda"),
             verbose=False,
         )
 
-    def _load_decoder(self, decoder_repo: str, decoder_filename: str, device: str, hf_token: Optional[str] = None) -> None:
+    def _load_decoder(self, decoder_repo, decoder_filename, device, hf_token=None):
         try:
             import onnxruntime as ort
         except ImportError:
-            raise ImportError("onnxruntime is required for Turbo mode. Install with: pip install onnxruntime")
+            raise ImportError("onnxruntime is required for Turbo mode.")
 
-        logger.info(f"🚀 Loading ONNX decoder from repo: {decoder_repo}")
-        
         if os.path.exists(decoder_repo):
             decoder_path = decoder_repo
         else:
             from huggingface_hub import hf_hub_download
             try:
                 decoder_path = hf_hub_download(
-                    repo_id=decoder_repo,
-                    filename=decoder_filename,
-                    token=hf_token
+                    repo_id=decoder_repo, filename=decoder_filename, token=hf_token
                 )
             except Exception:
-                 if os.path.exists(decoder_filename):
+                if os.path.exists(decoder_filename):
                     decoder_path = decoder_filename
-                 else:
-                    raise FileNotFoundError(f"Neither repo '{decoder_repo}' nor local file '{decoder_filename}' found.")
+                else:
+                    raise FileNotFoundError(f"Neither repo '{decoder_repo}' nor '{decoder_filename}' found.")
 
-        providers = ["CPUExecutionProvider"]
-        if device in ("gpu", "cuda"):
-            providers = ["CUDAExecutionProvider"] + providers
-            
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if device in ("gpu", "cuda") else ["CPUExecutionProvider"]
         self.decoder_sess = ort.InferenceSession(decoder_path, providers=providers)
 
-    def _get_voice_params(self, ref_codes: Any) -> tuple:
-        """Extract voice_id and embedding from ref_codes."""
-        if ref_codes is None:
-            return -1, np.zeros((1, 128), dtype=np.float32)
-            
-        # If it's an int, it's a direct voice_id
-        if isinstance(ref_codes, int):
-            return ref_codes, np.zeros((1, 128), dtype=np.float32)
-            
-        # If it's a dict (SDK voice object)
+    def _load_encoder(self, encoder_repo, encoder_filename, device, hf_token=None):
+        try:
+            import onnxruntime as ort
+        except ImportError:
+            return
+
+        if os.path.exists(encoder_repo):
+            encoder_path = encoder_repo
+        else:
+            from huggingface_hub import hf_hub_download
+            try:
+                encoder_path = hf_hub_download(
+                    repo_id=encoder_repo, filename=encoder_filename, token=hf_token
+                )
+            except Exception:
+                if os.path.exists(encoder_filename):
+                    encoder_path = encoder_filename
+                else:
+                    logger.warning("Speaker encoder not found, voice cloning might be limited in Turbo mode.")
+                    return
+
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if device in ("gpu", "cuda") else ["CPUExecutionProvider"]
+        self.encoder_sess = ort.InferenceSession(encoder_path, providers=providers)
+
+    def encode_reference(self, ref_audio: Any) -> np.ndarray:
+        """Standalone ONNX implementation for speaker encoding in Turbo mode."""
+        if self.encoder_sess is None:
+            raise RuntimeError("Speaker encoder model not loaded. Please ensure vieneu_encoder.onnx is available.")
+        
+        import librosa
+        if isinstance(ref_audio, (str, Path)):
+            wav, _ = librosa.load(ref_audio, sr=24000)
+        else:
+            wav = ref_audio
+        
+        if wav.ndim == 1:
+            wav = wav[None, :]
+        
+        inputs = {"waveform": wav.astype(np.float32)}
+        embedding = self.encoder_sess.run(None, inputs)[0]
+        return embedding
+
+    def _get_voice_params(self, ref_codes: Any) -> np.ndarray:
+        """Extract the 128-dim voice embedding for the new decoder logic."""
+        # Handle dict input (from get_preset_voice returned dict)
         if isinstance(ref_codes, dict):
-            voice_id = ref_codes.get("voice_id", -1)
-            embedding = ref_codes.get("codes")
-            if embedding is None or isinstance(embedding, (int, float)):
-                embedding = np.zeros((1, 128), dtype=np.float32)
-            elif isinstance(embedding, list):
-                embedding = np.array(embedding, dtype=np.float32)
+            ref_codes = ref_codes.get("codes")
             
-            if isinstance(embedding, np.ndarray) and embedding.ndim == 1:
-                embedding = embedding[None, :]
-            return voice_id, embedding
+        # Ensure it is a float32 numpy array with shape (1, D)
+        if isinstance(ref_codes, (np.ndarray, list)):
+            emb = np.array(ref_codes, dtype=np.float32)
+            if emb.ndim == 1:
+                emb = emb[None, :]
+            if emb.shape[-1] in [128]:
+                return emb
+        
+        # Fallback to zeros (128-dim)
+        return np.zeros((1, 128), dtype=np.float32)
 
-        # If it's a numpy array, it's an embedding
-        if isinstance(ref_codes, np.ndarray):
-            if ref_codes.ndim == 1:
-                ref_codes = ref_codes[None, :]
-            return -1, ref_codes
-            
-        return -1, np.zeros((1, 128), dtype=np.float32)
-
-    def _decode(self, codes_str: str, voice_id: int = -1, embedding: Optional[np.ndarray] = None) -> np.ndarray:
+    def _decode(self, codes_str: str, voice_embedding: Optional[np.ndarray] = None) -> np.ndarray:
         from .utils import extract_speech_ids
         speech_ids = extract_speech_ids(codes_str)
-        
         if not speech_ids:
             return np.array([], dtype=np.float32)
-
-        tokens = np.array(speech_ids, dtype=np.int64)[None, :]
-        v_id = np.array([voice_id], dtype=np.int64)
         
-        if embedding is None:
-            embedding = np.zeros((1, 128), dtype=np.float32)
+        tokens = np.array(speech_ids, dtype=np.int64)[None, :]
+        
+        if voice_embedding is None:
+            voice_embedding = np.zeros((1, 128), dtype=np.float32)
             
         inputs = {
-            "content_ids": tokens,
-            "voice_id": v_id,
-            "evoice_embedding": embedding
+            "content_ids": tokens, 
+            "voice_embedding": voice_embedding
         }
         audio = self.decoder_sess.run(None, inputs)[0]
-        # Ensure 1D output for watermarking (Samples,)
+        
         if audio.ndim == 3:
             return audio[0, 0, :]
         elif audio.ndim == 2:
@@ -196,6 +486,7 @@ class TurboVieNeuTTS(BaseVieneuTTS):
     def infer(
         self,
         text: str,
+        voice: Optional[Any] = None,
         ref_codes: Optional[Any] = None,
         temperature: float = 0.4,
         top_k: int = 50,
@@ -204,28 +495,24 @@ class TurboVieNeuTTS(BaseVieneuTTS):
         skip_phonemize: bool = False,
         **kwargs
     ) -> np.ndarray:
-        # Fix: Use full phonemization pipeline for bilingual support
-        if not skip_phonemize:
-            phonemes = phonemize_text(text)
-        else:
-            phonemes = text
+        phonemes = phonemize_text(text) if not skip_phonemize else text
 
         chunks = split_into_chunks_v2(phonemes, max_chunk_size=max_chars)
         if not chunks:
             return np.array([], dtype=np.float32)
-            
-        # Fix: Fallback to default voice if none provided
-        if ref_codes is None and self._default_voice:
-            ref_codes = self.get_preset_voice(self._default_voice)
-            
-        voice_id, emb = self._get_voice_params(ref_codes)
-        # Ensure voice_id is valid for backbone prompt (v2 turbo uses specific IDs)
-        v_idx = voice_id if voice_id >= 0 else 0
-        
+
+        # Use default voice if none provided
+        if voice is None:
+            voice = ref_codes
+        if voice is None:
+            voice = self.get_preset_voice()
+
+        voice_embedding = self._get_voice_params(voice)
+
         all_wavs = []
         for i, chunk in enumerate(chunks):
-            prompt = self._format_turbo_prompt(chunk)
-            
+            prompt = self._format_turbo_prompt(chunk.text)
+
             self.backbone.reset()
             result = self.backbone(
                 prompt,
@@ -236,23 +523,20 @@ class TurboVieNeuTTS(BaseVieneuTTS):
                 min_p=0.05,
                 stop=["<|SPEECH_GENERATION_END|>"],
                 repeat_penalty=1.15,
-                echo=False
+                echo=False,
             )
-            output_str = result["choices"][0]["text"]
-            wav = self._decode(output_str, voice_id, emb)
+            wav = self._decode(result["choices"][0]["text"], voice_embedding)
             all_wavs.append(wav)
-            
-            # Add silence between chunks
+
             if i < len(chunks) - 1:
                 silence_dur = get_silence_duration_v2(chunk)
-                silence = np.zeros(int(self.sample_rate * silence_dur), dtype=np.float32)
-                all_wavs.append(silence)
-            
+                if silence_dur > 0:
+                    all_wavs.append(np.zeros(int(self.sample_rate * silence_dur), dtype=np.float32))
+
         final_wav = np.concatenate(all_wavs) if len(all_wavs) > 1 else all_wavs[0]
         return self._apply_watermark(final_wav)
 
     def _format_turbo_prompt(self, phonemes: str) -> str:
-        # Use dynamic speaker token based on selected voice
         return (
             f"<|speaker_16|>"
             f"<|TEXT_PROMPT_START|>{phonemes}<|TEXT_PROMPT_END|>"
@@ -262,6 +546,7 @@ class TurboVieNeuTTS(BaseVieneuTTS):
     def infer_stream(
         self,
         text: str,
+        voice: Optional[Any] = None,
         ref_codes: Optional[Any] = None,
         temperature: float = 0.4,
         top_k: int = 50,
@@ -270,24 +555,20 @@ class TurboVieNeuTTS(BaseVieneuTTS):
         skip_phonemize: bool = False,
         **kwargs
     ) -> Generator[np.ndarray, None, None]:
-        # Fix: Use full phonemization pipeline for bilingual support
-        if not skip_phonemize:
-            phonemes = phonemize_text(text)
-        else:
-            phonemes = text
+        phonemes = phonemize_text(text) if not skip_phonemize else text
 
         chunks = split_into_chunks_v2(phonemes, max_chunk_size=max_chars)
-        
-        # Fix: Fallback to default voice if none provided
-        if ref_codes is None and self._default_voice:
-            ref_codes = self.get_preset_voice(self._default_voice)
-            
-        voice_id, emb = self._get_voice_params(ref_codes)
-        v_idx = voice_id if voice_id >= 0 else 0
-        
+
+        if voice is None:
+            voice = ref_codes
+        if voice is None:
+            voice = self.get_preset_voice()
+
+        voice_embedding = self._get_voice_params(voice)
+
         for i, chunk in enumerate(chunks):
-            prompt = self._format_turbo_prompt(chunk, v_idx)
-            
+            prompt = self._format_turbo_prompt(chunk.text)
+
             self.backbone.reset()
             result = self.backbone(
                 prompt,
@@ -298,24 +579,25 @@ class TurboVieNeuTTS(BaseVieneuTTS):
                 min_p=0.05,
                 stop=["<|SPEECH_GENERATION_END|>"],
                 repeat_penalty=1.15,
-                echo=False
+                echo=False,
             )
-            output_str = result["choices"][0]["text"]
-            wav = self._decode(output_str, voice_id, emb)
+            wav = self._decode(result["choices"][0]["text"], voice_embedding)
             yield self._apply_watermark(wav)
 
-            # Add silence between chunks
             if i < len(chunks) - 1:
                 silence_dur = get_silence_duration_v2(chunk)
-                silence = np.zeros(int(self.sample_rate * silence_dur), dtype=np.float32)
-                yield silence
+                if silence_dur > 0:
+                    yield np.zeros(int(self.sample_rate * silence_dur), dtype=np.float32)
 
-    def infer_batch(self, texts: List[str], **kwargs) -> List[np.ndarray]:
-        # Simple sequential batch for now
-        return [self.infer(t, **kwargs) for t in texts]
+    def infer_batch(self, texts: List[str], voice: Optional[Any] = None, ref_codes: Optional[Any] = None, apply_watermark: bool = True, **kwargs) -> List[np.ndarray]:
+        results = [self.infer(t, voice=voice, ref_codes=ref_codes, **kwargs) for t in texts]
+        if apply_watermark:
+            results = [self._apply_watermark(r) for r in results]
+        return results
 
     def close(self):
         if self.backbone:
             self.backbone.close()
             self.backbone = None
         self.decoder_sess = None
+        self.encoder_sess = None
