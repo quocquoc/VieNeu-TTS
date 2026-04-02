@@ -82,6 +82,7 @@ class FastVieNeuTTS(BaseVieneuTTS):
         self.backbone = pipeline(repo, backend_config=backend_config)
         self.gen_config = GenerationConfig(
             top_p=0.95, top_k=50, temperature=1.0, max_new_tokens=2048,
+            repetition_penalty=1.1,
             do_sample=True, min_new_tokens=40,
         )
 

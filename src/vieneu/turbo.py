@@ -50,11 +50,13 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
                     cache_max_entry_count=kwargs.get("memory_util", 0.3),
                     tp=kwargs.get("tp", 1),
                     enable_prefix_caching=kwargs.get("enable_prefix_caching", True),
-                    dtype='bfloat16' if self.device == "cuda" else 'float16'
+                    dtype='bfloat16',
+                    quant_policy=kwargs.get("quant_policy", 0)
                 )
                 self.backbone = pipeline(repo, backend_config=engine_config)
                 self.gen_config = GenerationConfig(
                     top_p=0.95, top_k=50, temperature=0.4, max_new_tokens=2048,
+                    repetition_penalty=1.1,
                     do_sample=True, stop_words=["<|SPEECH_GENERATION_END|>"]
                 )
             except ImportError:
@@ -171,6 +173,8 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
                         temperature=temperature,
                         top_k=top_k,
                         do_sample=True,
+                        repetition_penalty=1.1,
+                        top_p=0.95,
                         pad_token_id=self.tokenizer.eos_token_id,
                         # stop_strings=... is transformers >= 4.41.0
                         # For compatibility, we trim the output if eos is hit
@@ -302,6 +306,8 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
                         temperature=temperature,
                         top_k=top_k,
                         do_sample=True,
+                        repetition_penalty=1.1,
+                        top_p=0.95,
                         pad_token_id=self.tokenizer.eos_token_id,
                     )
                 generated_text = self.tokenizer.decode(output_tokens[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True)
@@ -578,7 +584,7 @@ class TurboVieNeuTTS(BaseVieneuTTS):
                 top_p=0.95,
                 min_p=0.05,
                 stop=["<|SPEECH_GENERATION_END|>"],
-                repeat_penalty=1.15,
+                repeat_penalty=1.1,
                 echo=False,
             )
             wav = self._decode(result["choices"][0]["text"], voice_embedding)
