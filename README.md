@@ -12,7 +12,9 @@
 **VieNeu-TTS** is an advanced on-device Vietnamese Text-to-Speech (TTS) model with **instant voice cloning** and **English-Vietnamese bilingual** support.
 
 > [!IMPORTANT]
-> **🚀 VieNeu-TTS-v2 Turbo:** The latest version is optimized for CPU & Low-end devices, featuring seamless **bilingual (Code-switching)** capabilities and ultra-fast inference.
+> **🚀 VieNeu-TTS-v2 Turbo:** Optimized for edge devices and extremely fast inference (CPU & Low-end devices).  
+> *Note: Quality is lower than the Standard VieNeu-TTS and may struggle with very short segments (< 5 words).*  
+> Version **VieNeu-TTS-v2 (Non-Turbo)** is coming soon!
 
 ## ✨ Key Features
 - **Bilingual (English-Vietnamese)**: Smooth and natural transitions between languages powered by [sea-g2p](https://github.com/pnnbao97/sea-g2p).
@@ -21,13 +23,13 @@
 - **AI Identification**: Built-in audio watermarking for responsible AI content creation.
 - **Production-Ready**: High-quality 24 kHz waveform generation, fully offline.
 
-https://github.com/user-attachments/assets/adb15c5b-185d-44e3-b7e4-417774cdef27
+[<img width="600" height="595" alt="VieNeu-TTS Demo" src="https://github.com/user-attachments/assets/021f6671-2d7f-4635-91fb-88b2ab0ddbcd" />](https://github.com/user-attachments/assets/021f6671-2d7f-4635-91fb-88b2ab0ddbcd)
 
 ## 📌 Table of Contents
 
 1. [🦜 Installation & Web UI](#installation)
 2. [📦 Using the Python SDK](#sdk)
-3. [🐳 Docker & Remote Server](#docker-remote)
+3. [🐳 High-Quality Server (Standard Mode)](#docker-remote)
 4. [🔬 Model Overview](#backbones)
 5. [🚀 Roadmap](#roadmap)
 6. [🤝 Support & Contact](#support)
@@ -55,10 +57,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 2. **Install Dependencies:**
    - **Option 1: Minimal (Turbo/CPU)** - Fast & Lightweight
+     > ⚠️ *Note: This mode only supports **VieNeu-TTS-v2-Turbo (CPU)** — runs on any machine without a GPU, but **audio quality is lower** than Standard VieNeu-TTS (especially for short phrases < 5 words). Recommended for quick testing or deployment on low-end devices.*
      ```bash
      uv sync
      ```
-   - **Option 2: Full (GPU/Standard)** - High Quality & Cloning
+   - **Option 2: Full (GPU/Standard)** - High Quality & Cloning *(For GPU users)*
+     > 💡 *Note: Requires a CUDA-compatible NVIDIA GPU (CUDA version >= 12.8) or Apple Silicon MPS. [NVIDIA Toolkit](https://developer.nvidia.com/cuda-downloads) is required for maximum speed. Enables the full **Standard VieNeu-TTS** backbone for maximum audio quality and high-fidelity voice cloning.*
      ```bash
      uv sync --group gpu
      ```
@@ -73,7 +77,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## 📦 2. Using the Python SDK (vieneu) <a name="sdk"></a>
 
-The `vieneu` SDK now defaults to **Turbo mode** for maximum compatibility.
+The `vieneu` SDK defaults to **Turbo mode** when used locally to prioritize extreme speed and real-time performance. To achieve maximum audio quality (Standard VieNeu-TTS), you should set up a [Remote Server](#docker-remote) and use the SDK in **remote mode**.
 
 ### Quick Start
 ```bash
@@ -141,7 +145,7 @@ tts.save(audio, "cloned_voice.wav")
 
 ---
 
-## 🐳 3. Docker & Remote Server <a name="docker-remote"></a>
+## 🐳 3. High-Quality Server (Standard Mode) <a name="docker-remote"></a>
 
 Deploy VieNeu-TTS as a high-performance API Server (powered by LMDeploy) with a single command.
 
@@ -232,14 +236,14 @@ docker run --gpus all \
 
 | Model | Format | Device | Bilingual | Cloning | Speed |
 |---|---|---|---|---|---|
-| **VieNeu-v2-Turbo** | GGUF/ONNX | **CPU/GPU** | ✅ | ✅ Yes | **Extreme** |
+| **VieNeu-v2-Turbo** | GGUF/ONNX | **CPU/Edge** | ✅ | ✅ Yes | **Extreme** (Fastest) |
 | **VieNeu-TTS-v2** | PyTorch | GPU | ✅ | ✅ Yes | **Standard** (Coming soon) |
 | **VieNeu-TTS 0.3B** | PyTorch | GPU/CPU | ❌ | ✅ Yes | **Very Fast** |
 | **VieNeu-TTS** | PyTorch | GPU/CPU | ❌ | ✅ Yes | **Standard** |
 
 > [!TIP]
-> Use **Turbo v2** for AI assistants, chatbots, and long-text reading on laptops. 
-> Use **GPU/Standard** for high-quality voice cloning and artistic content.
+> Use **Turbo v2** for AI assistants, chatbots, and real-time edge applications where speed is critical. Note: It may have stability issues with very short phrases (< 5 words).
+> Use **GPU/Standard** (VieNeu-TTS v1/v2) for maximum audio quality and high-fidelity voice cloning.
 
 ---
 

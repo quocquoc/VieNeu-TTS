@@ -16,7 +16,7 @@ class BaseVieneuTTS(ABC):
     Provides shared functionality for voice management and common operations.
     """
 
-    def __init__(self):
+    def __init__(self, codec_repo: Optional[str] = None, codec_device: str = "cpu"):
         self.sample_rate = 24_000
         self.max_context = 2048
         self.hop_length = 480
@@ -30,6 +30,53 @@ class BaseVieneuTTS(ABC):
         # Watermarker placeholder
         self.watermarker = None
         self._init_watermarker()
+
+        if codec_repo:
+            self._load_codec(codec_repo, codec_device)
+
+    def _load_codec(self, codec_repo: str, codec_device: str) -> None:
+        """Universal codec loader for all backends."""
+        logger.info(f"📦 Loading codec from: {codec_repo} on {codec_device} ...")
+
+        if codec_repo == "neuphonic/neucodec-onnx-decoder-int8":
+            if codec_device != "cpu":
+                logger.warning("⚠️ ONNX decoder only runs on CPU. Ignoring device selection.")
+            try:
+                from neucodec import NeuCodecOnnxDecoder
+                self.codec = NeuCodecOnnxDecoder.from_pretrained(codec_repo)
+                self._is_onnx_codec = True
+                return
+            except ImportError as e:
+                raise ImportError(
+                    "The 'neucodec' package is required for ONNX decoder. \n"
+                    "Please install it via: pip install neucodec"
+                ) from e
+
+        # For PyTorch codecs, check for torch first
+        try:
+            import torch
+            from neucodec import NeuCodec, DistillNeuCodec
+            
+            # Check MPS
+            if codec_device == "mps" and not torch.backends.mps.is_available():
+                logger.warning("⚠️ MPS not available for codec, falling back to CPU")
+                codec_device = "cpu"
+
+            if codec_repo == "neuphonic/neucodec":
+                self.codec = NeuCodec.from_pretrained(codec_repo)
+            elif codec_repo == "neuphonic/distill-neucodec":
+                self.codec = DistillNeuCodec.from_pretrained(codec_repo)
+            else:
+                raise ValueError(f"Unrecognized codec repository: {codec_repo}")
+
+            self.codec.eval().to(codec_device)
+        except ImportError:
+            raise ImportError(
+                f"Codec '{codec_repo}' requires PyTorch. \n"
+                "To remain lightweight in Remote mode, please use 'neuphonic/neucodec-onnx-decoder-int8'. \n"
+                "Or install torch via: pip install vieneu[gpu]"
+            )
+
 
     def _init_watermarker(self) -> None:
         """Initialize optional audio watermarker."""

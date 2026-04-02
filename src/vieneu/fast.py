@@ -7,9 +7,8 @@ import logging
 from collections import defaultdict
 from .base import BaseVieneuTTS
 from .utils import _compile_codec_with_triton, extract_speech_ids, _linear_overlap_add
-from vieneu_utils.phonemize_text import phonemize_with_dict, phonemize_batch
+from vieneu_utils.phonemize_text import phonemize_batch
 from vieneu_utils.core_utils import split_text_into_chunks, join_audio_chunks
-from neucodec import NeuCodec, DistillNeuCodec
 
 logger = logging.getLogger("Vieneu.Fast")
 
@@ -33,6 +32,7 @@ class FastVieNeuTTS(BaseVieneuTTS):
         hf_token: Optional[str] = None,
     ):
         super().__init__()
+        self.device = backbone_device
 
         if backbone_device != "cuda" and not backbone_device.startswith("cuda:"):
             raise ValueError("LMDeploy backend requires CUDA device")
@@ -86,28 +86,10 @@ class FastVieNeuTTS(BaseVieneuTTS):
             do_sample=True, min_new_tokens=40,
         )
 
-    def _load_codec(self, codec_repo, codec_device, enable_triton):
-        logger.info(f"Loading codec from: {codec_repo} on {codec_device}")
-        match codec_repo:
-            case "neuphonic/neucodec":
-                self.codec = NeuCodec.from_pretrained(codec_repo)
-                self.codec.eval().to(codec_device)
-            case "neuphonic/distill-neucodec":
-                self.codec = DistillNeuCodec.from_pretrained(codec_repo)
-                self.codec.eval().to(codec_device)
-            case "neuphonic/neucodec-onnx-decoder-int8":
-                if codec_device != "cpu":
-                    raise ValueError("ONNX decoder only runs on CPU")
-                try:
-                    from neucodec import NeuCodecOnnxDecoder
-                except ImportError as e:
-                    raise ImportError("Failed to import ONNX decoder.") from e
-                self.codec = NeuCodecOnnxDecoder.from_pretrained(codec_repo)
-                self._is_onnx_codec = True
-            case _:
-                raise ValueError(f"Unsupported codec repository: {codec_repo}")
+    def _load_codec(self, codec_repo: str, codec_device: str, enable_triton: bool) -> None:
+        super()._load_codec(codec_repo, codec_device)
 
-        if enable_triton and not self._is_onnx_codec and codec_device != "cpu":
+        if enable_triton and not getattr(self, "_is_onnx_codec", False) and codec_device != "cpu":
             self._triton_enabled = _compile_codec_with_triton(self.codec)
 
     def _warmup_model(self):

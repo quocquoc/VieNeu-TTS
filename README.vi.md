@@ -26,7 +26,7 @@
 ## 🦜 1. Cài đặt & Giao diện Web <a name="installation"></a>
 
 ### Thiết lập với `uv` (Khuyến nghị)
-`uv` là cách nhanh nhất để quản lý các phụ thuộc. [Cài đặt uv tại đây](https://astral.sh/uv/install).
+`uv` là cách nhanh nhất để quản lý các phụ thuộc.
 
 1. **Clone Repo:**
    ```bash
@@ -39,10 +39,12 @@
      ```bash
      uv sync
      ```
-   - **Lựa chọn 2: Đầy đủ (GPU/Standard)** - Chất lượng cao & Cloning
+     > ⚠️ **Lưu ý:** Chế độ này chỉ hỗ trợ **VieNeu-TTS-v2-Turbo (CPU)** — chạy được trên mọi máy không cần GPU, nhưng **chất lượng âm thanh thấp hơn** so với Standard VieNeu-TTS (đặc biệt với câu ngắn < 5 từ). Phù hợp để thử nghiệm nhanh hoặc triển khai trên thiết bị yếu.
+   - **Lựa chọn 2: Đầy đủ (GPU/Standard)** - Chất lượng cao & Cloning *(Dành cho người dùng GPU)*
      ```bash
      uv sync --group gpu
      ```
+     > 💡 **Lưu ý:** Yêu cầu GPU NVIDIA hỗ trợ CUDA (hoặc Apple Silicon MPS). Kích hoạt backbone **Standard VieNeu-TTS** đầy đủ để đạt chất lượng âm thanh tối đa và clone giọng độ trung thực cao.
 
 3. **Khởi chạy Giao diện Web:**
    ```bash

@@ -10,7 +10,6 @@ from .base import BaseVieneuTTS
 from .utils import extract_speech_ids, _linear_overlap_add
 from vieneu_utils.phonemize_text import phonemize_with_dict, phonemize_batch
 from vieneu_utils.core_utils import split_text_into_chunks, join_audio_chunks
-from neucodec import NeuCodec, DistillNeuCodec
 
 logger = logging.getLogger("Vieneu.Standard")
 
@@ -141,32 +140,7 @@ class VieNeuTTS(BaseVieneuTTS):
                     logger.warning(f"Failed to compile backbone: {e}")
 
     def _load_codec(self, codec_repo: str, codec_device: str) -> None:
-        if codec_device == "mps" and not torch.backends.mps.is_available():
-            logger.warning("Warning: MPS not available for codec, falling back to CPU")
-            codec_device = "cpu"
-
-        logger.info(f"Loading codec from: {codec_repo} on {codec_device} ...")
-
-        if codec_repo == "neuphonic/neucodec":
-            self.codec = NeuCodec.from_pretrained(codec_repo)
-        elif codec_repo == "neuphonic/distill-neucodec":
-            self.codec = DistillNeuCodec.from_pretrained(codec_repo)
-        elif codec_repo == "neuphonic/neucodec-onnx-decoder-int8":
-            if codec_device != "cpu":
-                raise ValueError("Onnx decoder only currently runs on CPU.")
-            try:
-                from neucodec import NeuCodecOnnxDecoder
-            except ImportError as e:
-                raise ImportError(
-                    "Failed to import the onnx decoder. Ensure onnxruntime and neucodec >= 0.0.4 are installed."
-                ) from e
-            self.codec = NeuCodecOnnxDecoder.from_pretrained(codec_repo)
-            self._is_onnx_codec = True
-        else:
-            raise ValueError(f"Unsupported codec repository: {codec_repo}")
-
-        if not self._is_onnx_codec:
-            self.codec.eval().to(codec_device)
+        super()._load_codec(codec_repo, codec_device)
 
     def load_lora_adapter(self, lora_repo_id: str, hf_token: Optional[str] = None) -> bool:
         if self._is_quantized_model:

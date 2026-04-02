@@ -102,12 +102,10 @@ def get_available_devices() -> list[str]:
     
     try:
         import torch
-        if sys.platform == "darwin":
-            if torch.backends.mps.is_available():
-                devices.append("MPS")
-        else:
-            if torch.cuda.is_available():
-                devices.append("CUDA")
+        if sys.platform == "darwin" and torch.backends.mps.is_available():
+            devices.append("MPS")
+        elif torch.cuda.is_available():
+            devices.append("CUDA")
     except ImportError:
         pass
 
@@ -119,9 +117,6 @@ def get_model_status_message() -> str:
     if not model_loaded or tts is None:
         return "⏳ Chưa tải model."
     
-    backbone_config = BACKBONE_CONFIGS.get(current_backbone, {})
-    codec_config = CODEC_CONFIGS.get(current_codec, {})
-    
     if "v2-Turbo" in (current_backbone or ""):
         backend_name = "⚡ Turbo (v2)"
     elif using_lmdeploy:
@@ -130,14 +125,21 @@ def get_model_status_message() -> str:
         backend_name = "📦 Standard"
     
     # We don't track the exact device strings perfectly in global state, so we estimate
-    device_info = "GPU" if (using_lmdeploy or "CUDA" in (current_backbone or "")) else "Auto"
+    try:
+        import torch
+        has_mps = torch.backends.mps.is_available()
+        has_cuda = torch.cuda.is_available()
+    except:
+        has_mps = has_cuda = False
+
+    device_info = "GPU (CUDA)" if (using_lmdeploy or "CUDA" in (current_backbone or "")) else ("MPS (Metal)" if has_mps else "Auto")
     
     if "v2-Turbo" in (current_backbone or ""):
-        codec_device = "CPU/GPU"
+        codec_device = "GPU/MPS" if (has_cuda or has_mps) else "CPU"
     elif "ONNX" in (current_codec or ""):
         codec_device = "CPU"
     else:
-        codec_device = "GPU/MPS" if (torch.cuda.is_available() if 'torch' in sys.modules else False) or (torch.backends.mps.is_available() if 'torch' in sys.modules else False) else "CPU"
+        codec_device = "GPU/MPS" if (has_cuda or has_mps) else "CPU"
 
     preencoded_note = ""    
     opt_info = ""
@@ -154,8 +156,8 @@ def get_model_status_message() -> str:
     return (
         f"✅ Model đã tải thành công!\n\n"
         f"🔧 Backend: {backend_name}\n"
-        f" Parrot: {current_backbone}\n"
-        f"🎵 Codec: {current_codec}{preencoded_note}{opt_info}"
+        f" Parrot: {current_backbone} on {device_info}\n"
+        f"🎵 Codec: {current_codec} on {codec_device}{preencoded_note}{opt_info}"
     )
 
 def restore_ui_state():
@@ -441,10 +443,13 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
             print(f"📦 Using original backend")
 
             if device_choice == "Auto":
-                if "gguf" in backbone_config['repo'].lower() or "v2-turbo" in backbone_config['repo'].lower():
-                    # GGUF: uses Metal on Mac, CUDA on Windows/Linux
+                repo_lower = backbone_config['repo'].lower()
+                is_gguf_backbone = "gguf" in repo_lower
+
+                if is_gguf_backbone:
+                    # GGUF backbones (llama-cpp-python): Metal on Mac, CUDA on Windows/Linux
                     if sys.platform == "darwin":
-                        backbone_device = "gpu"  # llama-cpp-python uses Metal
+                        backbone_device = "gpu"  # llama-cpp-python uses Metal via n_gpu_layers
                     else:
                         try:
                             import torch
@@ -452,7 +457,7 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
                         except ImportError:
                             backbone_device = "cpu"
                 else:
-                    # PyTorch model
+                    # PyTorch backbones (Standard, Turbo GPU): use native torch device
                     try:
                         import torch
                         if sys.platform == "darwin":
@@ -1264,15 +1269,9 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
                 </div>
                 <div class="warning-banner-grid">
                     <div class="warning-banner-item">
-                        <strong>🦜 Tính năng multi-language</strong>
-                        <div class="warning-banner-content">
-                            Bản <b>VieNeu-TTS-v2</b> (bao gồm cả bản <b>Turbo v2</b>) hỗ trợ đọc <b>song ngữ Anh-Việt</b> mượt mà và tự nhiên nhất nhờ sự hỗ trợ của thư viện <b>sea-g2p</b> và codec <b>VieNeu-Codec</b>.
-                        </div>
-                    </div>
-                    <div class="warning-banner-item">
                         <strong>🐆 Hệ máy GPU</strong>
                         <div class="warning-banner-content">
-                            Phiên bản <b>VieNeu-TTS-v2 Turbo</b> đã hỗ trợ song ngữ Anh Việt (code-switching) mượt mà và tốc độ rất nhanh - tuy nhiên vẫn đang trong quá trình thử nghiệm. Trong trường hợp bạn cần sự ổn định, hãy sử dụng version 1, để có độ chính xác cao nhất và giọng đọc tự nhiên nhất, hãy sử dụng <b>VieNeu-TTS (Mặc định - GPU)</b>. Chọn <b>VieNeu-TTS-0.3B (GPU)</b> để tăng tốc độ lên gấp 2 lần (độ chính xác đạt khoảng 80% so với bản gốc). 
+                            Để có độ chính xác cao nhất và giọng đọc tự nhiên nhất, hãy sử dụng <b>VieNeu-TTS (Mặc định - GPU)</b>. Chọn <b>VieNeu-TTS-0.3B (GPU)</b> để tăng tốc độ lên gấp 2 lần (độ chính xác đạt khoảng 80% so với bản gốc). 
                         </div>
                     </div>
                     <div class="warning-banner-item" style="background: #dcfce7; border-color: #86efac;">
@@ -1430,9 +1429,11 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             is_custom = (choice == "Custom Model")
             print(f"   🔄 Backbone changed to: {choice}")
             
-            # 1. Device logic - Always allow GPU options if model is marked (GPU)
-            is_gpu_model = "(GPU)" in choice or is_custom
-            if is_gpu_model:
+            # 1. Device logic
+            # Allow hardware acceleration (MPS/CUDA/Auto) for all GPU models AND Turbo (GGUF) models
+            is_hw_accel_supported = "(GPU)" in choice or "v2-Turbo" in choice or is_custom
+            
+            if is_hw_accel_supported:
                 dev_choices = get_available_devices()
                 initial_dev = "Auto"
             else:
@@ -1496,19 +1497,6 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             inputs=[custom_backbone_model_id],
             outputs=[custom_backbone_base_model, custom_audio, custom_text]
         )
-
-        # # Add a helpful notice for CPU users
-        # with gr.Row(elem_classes="warning-banner-grid", visible=True):
-        #     gr.Markdown(
-        #         """
-        #         <div class="warning-banner-item">
-        #             <strong>💡 Lưu ý cho người dùng CPU:</strong>
-        #             <div class="warning-banner-content">
-        #                 Với thiết bị không có GPU, hãy chọn bản <b>Turbo v2 (Khuyên dùng cho CPU)</b> để có tốc độ đọc tốt nhất.
-        #             </div>
-        #         </div>
-        #         """
-        #     )
 
         btn_load.click(
             fn=load_model,

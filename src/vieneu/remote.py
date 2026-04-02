@@ -1,19 +1,18 @@
 from pathlib import Path
 from typing import Optional, Union, List, Generator, Any, Dict
 import numpy as np
-import torch
 import requests
 import json
 import asyncio
 import logging
-from .standard import VieNeuTTS
+from .base import BaseVieneuTTS
 from .utils import _linear_overlap_add
-from vieneu_utils.phonemize_text import phonemize_with_dict
+from vieneu_utils.phonemize_text import phonemize_with_dict, phonemize_batch
 from vieneu_utils.core_utils import split_text_into_chunks, join_audio_chunks
 
 logger = logging.getLogger("Vieneu.Remote")
 
-class RemoteVieNeuTTS(VieNeuTTS):
+class RemoteVieNeuTTS(BaseVieneuTTS):
     """
     Client for VieNeu-TTS running on a remote LMDeploy server.
     """
@@ -30,10 +29,8 @@ class RemoteVieNeuTTS(VieNeuTTS):
         self.model_name = model_name
 
         super().__init__(
-            backbone_repo=None,
             codec_repo=codec_repo,
-            codec_device=codec_device,
-            hf_token=hf_token
+            codec_device=codec_device
         )
 
         self.streaming_frames_per_chunk = 10
@@ -46,7 +43,7 @@ class RemoteVieNeuTTS(VieNeuTTS):
         pass
 
 
-    def infer(self, text: str, ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None, ref_text: Optional[str] = None, max_chars: int = 256, silence_p: float = 0.15, crossfade_p: float = 0.0, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False) -> np.ndarray:
+    def infer(self, text: str, ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, 'torch.Tensor']] = None, ref_text: Optional[str] = None, max_chars: int = 256, silence_p: float = 0.15, crossfade_p: float = 0.0, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False, **kwargs) -> np.ndarray:
 
         ref_codes, ref_text = self._resolve_ref_voice(voice, ref_audio, ref_codes, ref_text)
 
@@ -85,7 +82,7 @@ class RemoteVieNeuTTS(VieNeuTTS):
             temperature=temperature, top_k=top_k, skip_normalize=True, apply_watermark=True
         ))
 
-    def infer_stream(self, text: str, ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None, ref_text: Optional[str] = None, max_chars: int = 256, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False) -> Generator[np.ndarray, None, None]:
+    def infer_stream(self, text: str, ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, 'torch.Tensor']] = None, ref_text: Optional[str] = None, max_chars: int = 256, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False) -> Generator[np.ndarray, None, None]:
 
         ref_codes, ref_text = self._resolve_ref_voice(voice, ref_audio, ref_codes, ref_text)
 
@@ -108,10 +105,19 @@ class RemoteVieNeuTTS(VieNeuTTS):
             "stream": True
         }
 
-        if isinstance(ref_codes, (torch.Tensor, np.ndarray)):
-            ref_codes_list = ref_codes.flatten().tolist()
-        else:
-            ref_codes_list = ref_codes
+        try:
+            import torch
+            if isinstance(ref_codes, torch.Tensor):
+                ref_codes_list = ref_codes.flatten().tolist()
+            elif isinstance(ref_codes, np.ndarray):
+                ref_codes_list = ref_codes.flatten().tolist()
+            else:
+                ref_codes_list = ref_codes
+        except ImportError:
+            if isinstance(ref_codes, np.ndarray):
+                ref_codes_list = ref_codes.flatten().tolist()
+            else:
+                ref_codes_list = ref_codes
 
         audio_cache: List[np.ndarray] = []
         token_cache: List[str] = [f"<|speech_{idx}|>" for idx in ref_codes_list]
@@ -165,7 +171,7 @@ class RemoteVieNeuTTS(VieNeuTTS):
             processed_recon = processed_recon[n_decoded_samples:]
             yield processed_recon
 
-    async def infer_async(self, text: str, ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None, ref_text: Optional[str] = None, max_chars: int = 256, silence_p: float = 0.15, crossfade_p: float = 0.0, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, session=None, skip_normalize: bool = False, apply_watermark: bool = True) -> np.ndarray:
+    async def infer_async(self, text: str, ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, 'torch.Tensor']] = None, ref_text: Optional[str] = None, max_chars: int = 256, silence_p: float = 0.15, crossfade_p: float = 0.0, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, session=None, skip_normalize: bool = False, apply_watermark: bool = True) -> np.ndarray:
         try:
             import aiohttp
         except ImportError:
@@ -196,7 +202,7 @@ class RemoteVieNeuTTS(VieNeuTTS):
             if should_close_session:
                 await session.close()
 
-    def infer_batch(self, texts: List[str], ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None, ref_text: Optional[str] = None, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False, apply_watermark: bool = True) -> List[np.ndarray]:
+    def infer_batch(self, texts: List[str], ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, 'torch.Tensor']] = None, ref_text: Optional[str] = None, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, skip_normalize: bool = False, apply_watermark: bool = True) -> List[np.ndarray]:
         """Synchronous wrapper for async batch inference."""
         return asyncio.run(self.infer_batch_async(
             texts, ref_audio=ref_audio, ref_codes=ref_codes, ref_text=ref_text,
@@ -208,7 +214,7 @@ class RemoteVieNeuTTS(VieNeuTTS):
         self,
         session,
         chunk: str,
-        ref_codes: Union[List[int], torch.Tensor, np.ndarray],
+        ref_codes: Union[List[int], 'torch.Tensor', np.ndarray],
         ref_text: str,
         temperature: float,
         top_k: int,
@@ -236,7 +242,7 @@ class RemoteVieNeuTTS(VieNeuTTS):
             logger.error(f"Error in async chunk: {e}")
             return np.array([], dtype=np.float32)
 
-    async def infer_batch_async(self, texts: List[str], ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, torch.Tensor]] = None, ref_text: Optional[str] = None, max_chars: int = 256, silence_p: float = 0.15, crossfade_p: float = 0.0, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, concurrency_limit: int = 50, skip_normalize: bool = False, apply_watermark: bool = True) -> List[np.ndarray]:
+    async def infer_batch_async(self, texts: List[str], ref_audio: Optional[Union[str, Path]] = None, ref_codes: Optional[Union[np.ndarray, 'torch.Tensor']] = None, ref_text: Optional[str] = None, max_chars: int = 256, silence_p: float = 0.15, crossfade_p: float = 0.0, voice: Optional[Dict[str, Any]] = None, temperature: float = 1.0, top_k: int = 50, concurrency_limit: int = 50, skip_normalize: bool = False, apply_watermark: bool = True) -> List[np.ndarray]:
         try:
             import aiohttp
         except ImportError:
