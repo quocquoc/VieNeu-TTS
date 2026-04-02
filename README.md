@@ -57,15 +57,15 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 2. **Install Dependencies:**
    - **Option 1: Minimal (Turbo/CPU)** - Fast & Lightweight
+     > ⚠️ *Note: This mode only supports **VieNeu-TTS-v2-Turbo (CPU)** — runs on any machine without a GPU, but **audio quality is lower** than Standard VieNeu-TTS (especially for short phrases < 5 words). Recommended for quick testing or deployment on low-end devices.*
      ```bash
      uv sync
      ```
-     > ⚠️ **Note:** This mode only supports **VieNeu-TTS-v2-Turbo (CPU)** — runs on any machine without a GPU, but **audio quality is lower** than Standard VieNeu-TTS (especially for short phrases < 5 words). Recommended for quick testing or deployment on low-end devices.
    - **Option 2: Full (GPU/Standard)** - High Quality & Cloning *(For GPU users)*
+     > 💡 *Note: Requires a CUDA-compatible NVIDIA GPU (CUDA version >= 12.8) or Apple Silicon MPS. [NVIDIA Toolkit](https://developer.nvidia.com/cuda-downloads) is required for maximum speed. Enables the full **Standard VieNeu-TTS** backbone for maximum audio quality and high-fidelity voice cloning.*
      ```bash
      uv sync --group gpu
      ```
-     > 💡 **Note:** Requires a CUDA-compatible NVIDIA GPU (or Apple Silicon MPS). Enables the full **Standard VieNeu-TTS** backbone for maximum audio quality and high-fidelity voice cloning.
 
 3. **Start the Web UI:**
    ```bash
