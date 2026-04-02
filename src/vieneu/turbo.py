@@ -23,8 +23,21 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
         **kwargs
     ):
         super().__init__()
-        # Normalize device: PyTorch expects 'cuda', Gradio might pass 'gpu'
-        self.device = "cuda" if device.lower() in ["cuda", "gpu"] else "cpu"
+        import torch
+        # Normalize device string (Gradio may pass 'gpu')
+        _d = device.lower()
+        if _d in ("cuda", "gpu"):
+            self.device = "cuda"
+        elif _d == "mps":
+            # Mirror standard.py: guard-check MPS availability
+            if torch.backends.mps.is_available():
+                self.device = "mps"
+            else:
+                logger.warning("MPS not available, falling back to CPU")
+                self.device = "cpu"
+        else:
+            self.device = "cpu"
+
         self.backend = backend.lower()
         self.backbone = None
         self.tokenizer = None
@@ -33,48 +46,80 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
         self._is_onnx_codec = True
         
         # Load components
-        self._load_backbone(backbone_repo, device, hf_token, **kwargs)
-        self._load_decoder(decoder_repo, decoder_filename, device, hf_token)
-        self._load_encoder(encoder_repo, encoder_filename, device, hf_token)
+        self._load_backbone(backbone_repo, self.device, hf_token, **kwargs)
+        self._load_decoder(decoder_repo, decoder_filename, self.device, hf_token)
+        self._load_encoder(encoder_repo, encoder_filename, self.device, hf_token)
         
         # Load voices
         self._load_voices(backbone_repo, hf_token)
 
     def _load_backbone(self, repo, device, hf_token=None, **kwargs):
+        """Load backbone — mirrors standard.py MPS guard pattern."""
         if self.backend == "lmdeploy":
-            try:
-                from lmdeploy import pipeline, TurbomindEngineConfig, GenerationConfig
-                logger.info(f"Loading Turbo GPU (LMDeploy) from: {repo}")
-                
-                engine_config = TurbomindEngineConfig(
-                    cache_max_entry_count=kwargs.get("memory_util", 0.3),
-                    tp=kwargs.get("tp", 1),
-                    enable_prefix_caching=kwargs.get("enable_prefix_caching", True),
-                    dtype='bfloat16',
-                    quant_policy=kwargs.get("quant_policy", 0)
+            # LMDeploy only supports CUDA; MPS/CPU fall through to standard
+            if self.device != "cuda":
+                logger.warning(
+                    f"LMDeploy requires CUDA but device is '{self.device}'. "
+                    "Falling back to Standard (Transformers)."
                 )
-                self.backbone = pipeline(repo, backend_config=engine_config)
-                self.gen_config = GenerationConfig(
-                    top_p=0.95, top_k=50, temperature=0.4, max_new_tokens=2048,
-                    repetition_penalty=1.1,
-                    do_sample=True, stop_words=["<|SPEECH_GENERATION_END|>"]
-                )
-            except ImportError:
-                logger.warning("LMDeploy not found. Falling back to Standard (Transformers).")
                 self.backend = "standard"
+            else:
+                try:
+                    from lmdeploy import pipeline, TurbomindEngineConfig, GenerationConfig
+                    logger.info(f"Loading Turbo GPU (LMDeploy) from: {repo}")
+                    
+                    engine_config = TurbomindEngineConfig(
+                        cache_max_entry_count=kwargs.get("memory_util", 0.3),
+                        tp=kwargs.get("tp", 1),
+                        enable_prefix_caching=kwargs.get("enable_prefix_caching", True),
+                        dtype='bfloat16',
+                        quant_policy=kwargs.get("quant_policy", 0)
+                    )
+                    self.backbone = pipeline(repo, backend_config=engine_config)
+                    self.gen_config = GenerationConfig(
+                        top_p=0.95, top_k=50, temperature=0.4, max_new_tokens=2048,
+                        repetition_penalty=1.1,
+                        do_sample=True, stop_words=["<|SPEECH_GENERATION_END|>"]
+                    )
+                    return
+                except ImportError:
+                    logger.warning("LMDeploy not found. Falling back to Standard (Transformers).")
+                    self.backend = "standard"
 
         if self.backend == "standard":
-            from transformers import AutoTokenizer, AutoModelForCausalLM
             import torch
+            from transformers import AutoTokenizer, AutoModelForCausalLM
             
             logger.info(f"Loading Turbo GPU (Standard) from: {repo} on {self.device}")
             self.tokenizer = AutoTokenizer.from_pretrained(repo, token=hf_token)
+
+            # dtype selection — mirrors standard.py:
+            #   cuda  → bfloat16 (fast, native support)
+            #   mps   → float32  (MPS does not support bfloat16 reliably)
+            #   cpu   → float32
+            if self.device == "cuda":
+                dtype = torch.bfloat16
+            else:
+                dtype = torch.float32
+
             self.backbone = AutoModelForCausalLM.from_pretrained(
-                repo, 
-                torch_dtype=torch.bfloat16 if self.device == "cuda" else torch.float32,
+                repo,
+                torch_dtype=dtype,
                 token=hf_token
-            ).to(self.device)
+            ).to(torch.device(self.device))  # use torch.device() like standard.py
             self.backbone.eval()
+
+    def _get_onnx_providers(self, device: str) -> list:
+        """Return appropriate ONNX Runtime providers.
+        
+        Mirrors standard.py's fallback logic:
+        - CUDA            → CUDAExecutionProvider + CPU
+        - MPS / CPU / any → CPUExecutionProvider only
+          (ONNX Runtime does not support MPS natively; CoreML EP is optional)
+        """
+        if device == "cuda":
+            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        return ["CPUExecutionProvider"]
 
     def _load_decoder(self, decoder_repo, decoder_filename, device, hf_token=None):
         import onnxruntime as ort
@@ -86,7 +131,8 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
                 repo_id=decoder_repo, filename=decoder_filename, token=hf_token
             )
         
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "cuda" in device or "gpu" in device else ["CPUExecutionProvider"]
+        providers = self._get_onnx_providers(device)
+        logger.info(f"Loading decoder ONNX on providers: {providers}")
         self.decoder_sess = ort.InferenceSession(decoder_path, providers=providers)
 
     def _load_encoder(self, encoder_repo, encoder_filename, device, hf_token=None):
@@ -103,7 +149,8 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
                 logger.warning("Speaker encoder not found for Turbo GPU.")
                 return
 
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if "cuda" in device or "gpu" in device else ["CPUExecutionProvider"]
+        providers = self._get_onnx_providers(device)
+        logger.info(f"Loading encoder ONNX on providers: {providers}")
         self.encoder_sess = ort.InferenceSession(encoder_path, providers=providers)
 
     def _get_voice_params(self, ref_codes: Any) -> np.ndarray:
@@ -141,6 +188,30 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
             f"<|SPEECH_GENERATION_START|>"
         )
 
+    def _run_standard_generate(self, prompt: str, temperature: float, top_k: int) -> str:
+        """Run one generate step with the Transformers backbone.
+
+        Mirrors standard.py's _infer_torch:
+        - Moves inputs to self.device
+        - Calls .cpu() on output_tokens before decoding (required for MPS)
+        """
+        import torch
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            output_tokens = self.backbone.generate(
+                **inputs,
+                max_new_tokens=2048,
+                temperature=temperature,
+                top_k=top_k,
+                do_sample=True,
+                repetition_penalty=1.1,
+                top_p=0.95,
+                pad_token_id=self.tokenizer.eos_token_id,
+            )
+        # .cpu() mirrors standard.py line pattern: handles MPS tensors correctly
+        new_tokens = output_tokens[0, inputs.input_ids.shape[-1]:].cpu()
+        return self.tokenizer.decode(new_tokens, skip_special_tokens=True)
+
     def infer(self, text: str, voice: Optional[Any] = None, ref_codes: Optional[Any] = None, temperature: float = 0.4, top_k: int = 50, max_chars: int = 256, skip_normalize: bool = False, skip_phonemize: bool = False, **kwargs) -> np.ndarray:
         from vieneu_utils.phonemize_text import phonemize_text
         from vieneu_utils.core_utils import split_into_chunks_v2, get_silence_duration_v2
@@ -164,22 +235,7 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
                 responses = self.backbone([prompt], gen_config=self.gen_config, do_preprocess=False)
                 generated_text = responses[0].text
             else:
-                import torch
-                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-                with torch.no_grad():
-                    output_tokens = self.backbone.generate(
-                        **inputs,
-                        max_new_tokens=2048,
-                        temperature=temperature,
-                        top_k=top_k,
-                        do_sample=True,
-                        repetition_penalty=1.1,
-                        top_p=0.95,
-                        pad_token_id=self.tokenizer.eos_token_id,
-                        # stop_strings=... is transformers >= 4.41.0
-                        # For compatibility, we trim the output if eos is hit
-                    )
-                generated_text = self.tokenizer.decode(output_tokens[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True)
+                generated_text = self._run_standard_generate(prompt, temperature, top_k)
             
             wav = self._decode(generated_text, voice_embedding)
             all_wavs.append(wav)
@@ -297,20 +353,7 @@ class TurboGPUVieNeuTTS(BaseVieneuTTS):
                 responses = self.backbone([prompt], gen_config=self.gen_config, do_preprocess=False)
                 generated_text = responses[0].text
             else:
-                import torch
-                inputs = self.tokenizer(prompt, return_tensors="pt").to(self.device)
-                with torch.no_grad():
-                    output_tokens = self.backbone.generate(
-                        **inputs,
-                        max_new_tokens=2048,
-                        temperature=temperature,
-                        top_k=top_k,
-                        do_sample=True,
-                        repetition_penalty=1.1,
-                        top_p=0.95,
-                        pad_token_id=self.tokenizer.eos_token_id,
-                    )
-                generated_text = self.tokenizer.decode(output_tokens[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True)
+                generated_text = self._run_standard_generate(prompt, temperature, top_k)
             
             wav = self._decode(generated_text, voice_embedding)
             yield self._apply_watermark(wav)
@@ -346,11 +389,28 @@ class TurboVieNeuTTS(BaseVieneuTTS):
         self.encoder_sess = None
         self._is_onnx_codec = True
         self.max_context = 4096
-        
+
+        # Normalize device — mirrors standard.py pattern.
+        # llama-cpp-python handles Metal (Apple Silicon GPU) via n_gpu_layers,
+        # it does not accept 'mps' as a device string. We map:
+        #   'gpu' / 'cuda' -> 'cuda'  (CUDA GPU layers)
+        #   'mps'          -> 'cpu'   (llama-cpp uses Metal automatically via n_gpu_layers on macOS)
+        #   anything else  -> 'cpu'
+        _d = device.lower()
+        if _d in ("gpu", "cuda"):
+            self.device = "cuda"
+        elif _d == "mps":
+            # llama-cpp-python uses Metal natively on macOS with n_gpu_layers=-1.
+            # Treat as 'cpu' for the device string; Metal is enabled via n_gpu_layers.
+            logger.info("MPS requested: llama-cpp-python uses Metal natively via n_gpu_layers. Treating device as 'cpu'.")
+            self.device = "cpu"
+        else:
+            self.device = "cpu"
+
         # Load components
-        self._load_backbone(backbone_repo, backbone_filename, device, hf_token)
-        self._load_decoder(decoder_repo, decoder_filename, device, hf_token)
-        self._load_encoder(encoder_repo, encoder_filename, device, hf_token)
+        self._load_backbone(backbone_repo, backbone_filename, self.device, hf_token)
+        self._load_decoder(decoder_repo, decoder_filename, self.device, hf_token)
+        self._load_encoder(encoder_repo, encoder_filename, self.device, hf_token)
         
         # Load voices from the repository/directory (uses voices.json)
         self._load_voices(backbone_repo, hf_token)
@@ -375,14 +435,28 @@ class TurboVieNeuTTS(BaseVieneuTTS):
                 else:
                     raise FileNotFoundError(f"Neither repo '{backbone_repo}' nor '{backbone_filename}' found.")
 
+        # 'cuda' -> offload all layers to GPU; 'cpu' -> CPU only
+        # On macOS, llama-cpp uses Metal automatically when n_gpu_layers != 0
+        use_gpu = device == "cuda"
         self.backbone = Llama(
             model_path=model_path,
             n_ctx=self.max_context,
-            n_gpu_layers=-1 if device in ("gpu", "cuda") else 0,
+            n_gpu_layers=-1 if use_gpu else 0,
             mlock=True,
-            flash_attn=device in ("gpu", "cuda"),
+            flash_attn=use_gpu,
             verbose=False,
         )
+
+    def _get_onnx_providers(self, device: str) -> list:
+        """Return appropriate ONNX Runtime providers.
+
+        Mirrors TurboGPUVieNeuTTS._get_onnx_providers:
+        - cuda -> CUDAExecutionProvider + CPU
+        - cpu  -> CPUExecutionProvider only
+        """
+        if device == "cuda":
+            return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+        return ["CPUExecutionProvider"]
 
     def _load_decoder(self, decoder_repo, decoder_filename, device, hf_token=None):
         try:
@@ -404,7 +478,8 @@ class TurboVieNeuTTS(BaseVieneuTTS):
                 else:
                     raise FileNotFoundError(f"Neither repo '{decoder_repo}' nor '{decoder_filename}' found.")
 
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if device in ("gpu", "cuda") else ["CPUExecutionProvider"]
+        providers = self._get_onnx_providers(device)
+        logger.info(f"Loading decoder ONNX on providers: {providers}")
         self.decoder_sess = ort.InferenceSession(decoder_path, providers=providers)
 
     def _load_encoder(self, encoder_repo, encoder_filename, device, hf_token=None):
@@ -428,7 +503,8 @@ class TurboVieNeuTTS(BaseVieneuTTS):
                     logger.warning("Speaker encoder not found, voice cloning might be limited in Turbo mode.")
                     return
 
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if device in ("gpu", "cuda") else ["CPUExecutionProvider"]
+        providers = self._get_onnx_providers(device)
+        logger.info(f"Loading encoder ONNX on providers: {providers}")
         self.encoder_sess = ort.InferenceSession(encoder_path, providers=providers)
 
     def encode_reference(self, ref_audio: Any) -> np.ndarray:
@@ -584,7 +660,7 @@ class TurboVieNeuTTS(BaseVieneuTTS):
                 top_p=0.95,
                 min_p=0.05,
                 stop=["<|SPEECH_GENERATION_END|>"],
-                repeat_penalty=1.1,
+                repeat_penalty=1.15,
                 echo=False,
             )
             wav = self._decode(result["choices"][0]["text"], voice_embedding)

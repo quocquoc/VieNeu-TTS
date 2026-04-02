@@ -102,12 +102,10 @@ def get_available_devices() -> list[str]:
     
     try:
         import torch
-        if sys.platform == "darwin":
-            if torch.backends.mps.is_available():
-                devices.append("MPS")
-        else:
-            if torch.cuda.is_available():
-                devices.append("CUDA")
+        if sys.platform == "darwin" and torch.backends.mps.is_available():
+            devices.append("MPS")
+        elif torch.cuda.is_available():
+            devices.append("CUDA")
     except ImportError:
         pass
 
@@ -119,9 +117,6 @@ def get_model_status_message() -> str:
     if not model_loaded or tts is None:
         return "⏳ Chưa tải model."
     
-    backbone_config = BACKBONE_CONFIGS.get(current_backbone, {})
-    codec_config = CODEC_CONFIGS.get(current_codec, {})
-    
     if "v2-Turbo" in (current_backbone or ""):
         backend_name = "⚡ Turbo (v2)"
     elif using_lmdeploy:
@@ -130,14 +125,21 @@ def get_model_status_message() -> str:
         backend_name = "📦 Standard"
     
     # We don't track the exact device strings perfectly in global state, so we estimate
-    device_info = "GPU" if (using_lmdeploy or "CUDA" in (current_backbone or "")) else "Auto"
+    try:
+        import torch
+        has_mps = torch.backends.mps.is_available()
+        has_cuda = torch.cuda.is_available()
+    except:
+        has_mps = has_cuda = False
+
+    device_info = "GPU (CUDA)" if (using_lmdeploy or "CUDA" in (current_backbone or "")) else ("MPS (Metal)" if has_mps else "Auto")
     
     if "v2-Turbo" in (current_backbone or ""):
-        codec_device = "CPU/GPU"
+        codec_device = "GPU/MPS" if (has_cuda or has_mps) else "CPU"
     elif "ONNX" in (current_codec or ""):
         codec_device = "CPU"
     else:
-        codec_device = "GPU/MPS" if (torch.cuda.is_available() if 'torch' in sys.modules else False) or (torch.backends.mps.is_available() if 'torch' in sys.modules else False) else "CPU"
+        codec_device = "GPU/MPS" if (has_cuda or has_mps) else "CPU"
 
     preencoded_note = ""    
     opt_info = ""
@@ -154,8 +156,8 @@ def get_model_status_message() -> str:
     return (
         f"✅ Model đã tải thành công!\n\n"
         f"🔧 Backend: {backend_name}\n"
-        f" Parrot: {current_backbone}\n"
-        f"🎵 Codec: {current_codec}{preencoded_note}{opt_info}"
+        f" Parrot: {current_backbone} on {device_info}\n"
+        f"🎵 Codec: {current_codec} on {codec_device}{preencoded_note}{opt_info}"
     )
 
 def restore_ui_state():
@@ -1430,9 +1432,11 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             is_custom = (choice == "Custom Model")
             print(f"   🔄 Backbone changed to: {choice}")
             
-            # 1. Device logic - Always allow GPU options if model is marked (GPU)
-            is_gpu_model = "(GPU)" in choice or is_custom
-            if is_gpu_model:
+            # 1. Device logic
+            # Allow hardware acceleration (MPS/CUDA/Auto) for all GPU models AND Turbo (GGUF) models
+            is_hw_accel_supported = "(GPU)" in choice or "v2-Turbo" in choice or is_custom
+            
+            if is_hw_accel_supported:
                 dev_choices = get_available_devices()
                 initial_dev = "Auto"
             else:
@@ -1496,19 +1500,6 @@ with gr.Blocks(theme=theme, css=css, title="VieNeu-TTS", head=head_html) as demo
             inputs=[custom_backbone_model_id],
             outputs=[custom_backbone_base_model, custom_audio, custom_text]
         )
-
-        # # Add a helpful notice for CPU users
-        # with gr.Row(elem_classes="warning-banner-grid", visible=True):
-        #     gr.Markdown(
-        #         """
-        #         <div class="warning-banner-item">
-        #             <strong>💡 Lưu ý cho người dùng CPU:</strong>
-        #             <div class="warning-banner-content">
-        #                 Với thiết bị không có GPU, hãy chọn bản <b>Turbo v2 (Khuyên dùng cho CPU)</b> để có tốc độ đọc tốt nhất.
-        #             </div>
-        #         </div>
-        #         """
-        #     )
 
         btn_load.click(
             fn=load_model,
