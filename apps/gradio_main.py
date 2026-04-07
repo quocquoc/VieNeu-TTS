@@ -291,8 +291,12 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
         # Use LMDeploy only if Force LMDeploy is set and the model is compatible
         # NOTE: For VieNeu-v2-Turbo, we handle LMDeploy inside TurboGPUVieNeuTTS class, 
         # so we set use_lmdeploy = False here to avoid generic FastVieNeuTTS loading.
+        # NOTE: For custom_loading, the block above already decided use_lmdeploy correctly
+        # (e.g. False for GGUF repos). Do NOT override that decision here.
         if "v2-Turbo" in backbone_choice:
              should_use_generic_fast = False
+        elif custom_loading:
+             should_use_generic_fast = False  # already handled above per repo name
         else:
              should_use_generic_fast = force_lmdeploy and should_use_lmdeploy(backbone_choice, device_choice)
              
@@ -339,6 +343,7 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
                     try:
                         # Use GPU for merging if available for speed
                         # We use the Base Model specified
+                        from vieneu.standard import VieNeuTTS
                         base_repo = BACKBONE_CONFIGS[custom_base_model]["repo"]
                         merge_device = "cuda" if torch.cuda.is_available() else "cpu"
                         
