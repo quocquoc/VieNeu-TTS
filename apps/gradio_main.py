@@ -150,7 +150,7 @@ def get_model_status_message() -> str:
             f"\n  • Triton: {'✅' if stats['triton_enabled'] else '❌'}"
             f"\n  • Max Batch Size (Default): {stats.get('max_batch_size', 'N/A')}"
             f"\n  • Reference Cache: {stats['cached_references']} voices"
-            f"\n  • Prefix Caching: ✅"
+            f"\n  • Prefix Caching: ❌"
         )
 
     return (
@@ -413,7 +413,7 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
                     codec_device=codec_device,
                     memory_util=0.3,
                     tp=1,
-                    enable_prefix_caching=True,
+                    enable_prefix_caching=False,
                     enable_triton=True,
                     hf_token=custom_hf_token
                 )
@@ -575,7 +575,7 @@ def load_model(backbone_choice: str, codec_choice: str, device_choice: str,
                 f"\n  • Triton: {'✅' if stats['triton_enabled'] else '❌'}"
                 f"\n  • Max Batch Size (Default): {stats.get('max_batch_size', 'N/A')}"
                 f"\n  • Reference Cache: {stats['cached_references']} voices"
-                f"\n  • Prefix Caching: ✅"
+                f"\n  • Prefix Caching: ❌"
             )
         
         warning_msg = ""
